@@ -8,27 +8,27 @@ const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); r
 // ════════════════════════════════════════════════════════════════════════════
 // MANAGEMENT / HR DASHBOARD
 // ════════════════════════════════════════════════════════════════════════════
-export function ManagementDashboard({ users, attendance, leaves, reimbursements, isMobile, setTab }) {
+export function ManagementDashboard({ users, attendance, leaves, reimbursements, isMobile, setTab, lateCutoff="10:15" }) {
   const today = todayStr();
   const staff = users.filter(u => ["member", "lead"].includes(u.role) && u.active !== false);
 
   const todayAtt = attendance.filter(a => a.date === today);
   const presentToday = todayAtt.filter(a => a.status === "approved");
   const loggedToday = todayAtt;
-  const pendingAttToday = todayAtt.filter(a => a.status === "pending");
+  const pendingAttToday = todayAtt.filter(a => a.status && a.status.startsWith("pending"));
 
   // On leave today (approved leaves covering today)
   const onLeaveToday = leaves.filter(l => l.status === "approved" && l.from_date <= today && l.to_date >= today);
 
-  // Late comers (logged in after 09:30)
-  const lateComers = todayAtt.filter(a => a.login_time && a.login_time > "09:30");
+  // Late comers (logged in after configurable cutoff)
+  const lateComers = todayAtt.filter(a => a.login_time && a.login_time > lateCutoff);
 
   // Pending approvals across the org
   const pendingLeaves = leaves.filter(l => l.status === "pending_lead" || l.status === "pending_hr");
   const pendingReimbs = reimbursements.filter(r => r.status === "pending_lead" || r.status === "pending_hr");
   const pendingReimbAmount = pendingReimbs.reduce((a, r) => a + Number(r.amount), 0);
 
-  // Absent = active staff who didn't log in and aren't on leave
+  // Absent = active staff who did not log in and are not on leave
   const onLeaveIds = new Set(onLeaveToday.map(l => l.user_id));
   const loggedIds = new Set(loggedToday.map(a => a.user_id));
   const absentToday = staff.filter(s => !loggedIds.has(s.id) && !onLeaveIds.has(s.id));
@@ -39,7 +39,7 @@ export function ManagementDashboard({ users, attendance, leaves, reimbursements,
     { label: "Present Today", value: presentToday.length, sub: `of ${staff.length} staff`, icon: "✅", color: theme.green, bg: theme.greenBg },
     { label: "On Leave Today", value: onLeaveToday.length, sub: "approved leaves", icon: "📅", color: theme.purple, bg: theme.purpleBg },
     { label: "Absent", value: absentToday.length, sub: "not logged in", icon: "❌", color: theme.red, bg: theme.redBg },
-    { label: "Late Comers", value: lateComers.length, sub: "after 9:30 AM", icon: "⏰", color: theme.amber, bg: theme.amberBg },
+    { label: "Late Comers", value: lateComers.length, sub: `after ${lateCutoff}`, icon: "⏰", color: theme.amber, bg: theme.amberBg },
   ];
 
   return <div className="anm-fade">
@@ -110,7 +110,7 @@ export function ManagementDashboard({ users, attendance, leaves, reimbursements,
 // ════════════════════════════════════════════════════════════════════════════
 // AI ASSISTANT (rule-based natural-language Q&A over the data)
 // ════════════════════════════════════════════════════════════════════════════
-export function AIAssistant({ users, attendance, leaves, reimbursements, isMobile }) {
+export function AIAssistant({ users, attendance, leaves, reimbursements, isMobile, lateCutoff="10:15" }) {
   const [messages, setMessages] = useState([
     { from: "ai", text: "Hi! I'm your ANM assistant. Ask me about attendance, leaves, or claims. Try one of the suggestions below 👇" },
   ]);
@@ -137,7 +137,7 @@ export function AIAssistant({ users, attendance, leaves, reimbursements, isMobil
     // Present today
     if (/present|who.*(in|here).*today/.test(ql) && !/leave/.test(ql)) {
       const present = attendance.filter(a => a.date === today && a.status === "approved").map(a => getU(a.user_id)?.name).filter(Boolean);
-      const pending = attendance.filter(a => a.date === today && a.status === "pending").map(a => getU(a.user_id)?.name).filter(Boolean);
+      const pending = attendance.filter(a => a.date === today && a.status && a.status.startsWith("pending")).map(a => getU(a.user_id)?.name).filter(Boolean);
       let r = `✅ Present today (${present.length}): ${nameList(present)}.`;
       if (pending.length) r += `\n⏳ Logged in but pending approval: ${nameList(pending)}.`;
       return r;
@@ -151,8 +151,8 @@ export function AIAssistant({ users, attendance, leaves, reimbursements, isMobil
     }
     // Late today
     if (/late|after 9|came late|tardy/.test(ql)) {
-      const late = attendance.filter(a => a.date === today && a.login_time && a.login_time > "09:30").map(a => `${getU(a.user_id)?.name} (${a.login_time})`);
-      return late.length ? `⏰ Late comers today (after 9:30): ${nameList(late)}.` : "👍 No late arrivals today.";
+      const late = attendance.filter(a => a.date === today && a.login_time && a.login_time > lateCutoff).map(a => `${getU(a.user_id)?.name} (${a.login_time})`);
+      return late.length ? `⏰ Late comers today (after ${lateCutoff}): ${nameList(late)}.` : "👍 No late arrivals today.";
     }
     // On leave THIS week (currently approved overlapping this week)
     if (/leave.*this week|this week.*leave|on leave (this )?week/.test(ql) || (/who.*leave/.test(ql) && /this week/.test(ql))) {
@@ -192,7 +192,7 @@ export function AIAssistant({ users, attendance, leaves, reimbursements, isMobil
     if (/pending|approval|waiting/.test(ql)) {
       const pl = leaves.filter(l => l.status.startsWith("pending")).length;
       const pr = reimbursements.filter(r => r.status.startsWith("pending")).length;
-      const pa = attendance.filter(a => a.status === "pending").length;
+      const pa = attendance.filter(a => a.status && a.status.startsWith("pending")).length;
       return `⏳ Pending approvals:\n• Leaves: ${pl}\n• Claims: ${pr}\n• Attendance: ${pa}`;
     }
 
@@ -209,7 +209,7 @@ export function AIAssistant({ users, attendance, leaves, reimbursements, isMobil
 
   return <div className="anm-fade">
     <h2 style={{ margin: "0 0 4px", fontSize: 20, fontWeight: 800 }}>🤖 AI Assistant</h2>
-    <div style={{ color: theme.muted, fontSize: 13, marginBottom: 16 }}>Ask questions about your team's attendance, leaves, and claims.</div>
+    <div style={{ color: theme.muted, fontSize: 13, marginBottom: 16 }}>Ask questions about team attendance, leaves, and claims.</div>
 
     <Card style={{ padding: 0, overflow: "hidden", display: "flex", flexDirection: "column", height: isMobile ? "60vh" : 480 }}>
       {/* Chat area */}
@@ -258,7 +258,7 @@ export function TeamCalendar({ users, leaves, attendance, isMobile }) {
   const staff = users.filter(u => ["member", "lead"].includes(u.role) && u.active !== false);
   const getU = id => users.find(u => u.id === id);
 
-  // For a given date, who's on leave
+  // For a given date, who is on leave
   const leavesOn = (dateStr) => leaves.filter(l => l.status === "approved" && l.from_date <= dateStr && l.to_date >= dateStr);
 
   const [selectedDay, setSelectedDay] = useState(null);

@@ -36,30 +36,44 @@ export function useProfiles() {
 // ── Attendance (login + logout) ──────────────────────────────────────────────
 export function useAttendance() {
   const { rows, refetch } = useRealtimeTable("attendance", "date");
-  // Login: create today's row with login_time = now
-  const login = async (userId, note) => {
-    const { error } = await supabase.from("attendance").insert({ user_id: userId, date: today(), login_time: nowTime(), note, status: "pending" });
+  // Login: create todays row. submitterRole decides start status:
+  //   staff (member) → pending_lead (lead recommends, then HR approves)
+  //   lead → pending_hr (management approves directly)
+  const login = async (userId, note, submitterRole) => {
+    const startStatus = submitterRole === "member" ? "pending_lead" : "pending_hr";
+    const { error } = await supabase.from("attendance").insert({ user_id: userId, date: today(), login_time: nowTime(), note, status: startStatus });
     return { error };
   };
-  // Logout: set logout_time = now on today's row
+  // Logout: set logout_time = now on todays row
   const logout = async (rowId) => {
     const { error } = await supabase.from("attendance").update({ logout_time: nowTime() }).eq("id", rowId);
     return { error };
   };
-  const review = async (id, userId, action, remark) => {
-    const approved = action === "approve";
-    const { error } = await supabase.from("attendance").update({ status: approved ? "approved" : "rejected", approver_remark: remark, approved_at: new Date().toISOString() }).eq("id", id);
-    await supabase.from("notifications").insert({ user_id: userId, type: "attendance", message: approved ? "Your attendance was approved." : "Your attendance was rejected." });
-    return { error };
+  // Two-step: lead recommends (pending_lead→pending_hr); HR approves (pending_hr→approved)
+  const review = async (row, action, remark) => {
+    let patch = {};
+    if (action === "lead_approve") patch = { status: "pending_hr", lead_comment: remark, lead_at: new Date().toISOString() };
+    if (action === "lead_reject")  patch = { status: "rejected",    lead_comment: remark, lead_at: new Date().toISOString() };
+    if (action === "hr_approve")   patch = { status: "approved",    approver_remark: remark, approved_at: new Date().toISOString() };
+    if (action === "hr_reject")    patch = { status: "rejected",    approver_remark: remark, approved_at: new Date().toISOString() };
+    const { error } = await supabase.from("attendance").update(patch).eq("id", row.id);
+    let msg = null;
+    if (action === "lead_reject") msg = "Your attendance was not recommended by your senior.";
+    if (action === "hr_approve")  msg = "Your attendance was approved.";
+    if (action === "hr_reject")   msg = "Your attendance was rejected by Management.";
+    if (msg) await supabase.from("notifications").insert({ user_id: row.user_id, type: "attendance", message: msg, ref_id: row.id });
+    return { error, finalDecision: action.startsWith("hr_") };
   };
   return { attendance: rows, login, logout, review, refetch };
 }
 
-// ── Leaves ───────────────────────────────────────────────────────────────────
+// ── Leaves (two-step routed, same as attendance) ─────────────────────────────
 export function useLeaves() {
   const { rows, refetch } = useRealtimeTable("leaves", "submitted_at");
-  const submit = async (userId, leadId, hrId, data) => {
-    const { error } = await supabase.from("leaves").insert({ user_id: userId, lead_id: leadId, hr_id: hrId, type: data.type, from_date: data.from, to_date: data.to, days: data.days, reason: data.reason, status: "pending_lead" });
+  // staff → pending_lead (lead recommends → HR approves); lead → pending_hr (HR approves directly)
+  const submit = async (userId, leadId, hrId, data, submitterRole) => {
+    const startStatus = submitterRole === "member" ? "pending_lead" : "pending_hr";
+    const { error } = await supabase.from("leaves").insert({ user_id: userId, lead_id: leadId, hr_id: hrId, type: data.type, from_date: data.from, to_date: data.to, days: data.days, reason: data.reason, status: startStatus });
     return { error };
   };
   const review = async (row, action, comment) => {
@@ -79,11 +93,18 @@ export function useLeaves() {
   return { leaves: rows, submit, review, refetch };
 }
 
-// ── Reimbursements (with attachments) ────────────────────────────────────────
+// ── Reimbursements (assigner-based flow) ─────────────────────────────────────
 export function useReimbursements() {
   const { rows, refetch } = useRealtimeTable("reimbursements", "submitted_at");
-  const submit = async (userId, leadId, hrId, data) => {
-    const { error } = await supabase.from("reimbursements").insert({ user_id: userId, lead_id: leadId, hr_id: hrId, category: data.category, amount: data.amount, description: data.description, invoice_note: data.invoiceNote, attachments: data.attachments || [], status: "pending_lead" });
+  // assignerRole: if 'lead' → pending_lead (lead recommends, then HR approves).
+  //               if 'hr'/'admin' → pending_hr (they approve directly, 1 step).
+  const submit = async (userId, data) => {
+    const startStatus = (data.assignerRole === "lead") ? "pending_lead" : "pending_hr";
+    const { error } = await supabase.from("reimbursements").insert({
+      user_id: userId, assigner_id: data.assignerId, lead_id: data.assignerRole === "lead" ? data.assignerId : null,
+      hr_id: null, category: data.category, amount: data.amount, description: data.description,
+      invoice_note: data.invoiceNote, attachments: data.attachments || [], status: startStatus,
+    });
     return { error };
   };
   const review = async (row, action, comment) => {
@@ -129,6 +150,15 @@ export async function uploadAvatar(userId, file) {
 export async function updateMyProfile(userId, patch) {
   const { error } = await supabase.from("profiles").update(patch).eq("id", userId);
   return { error };
+}
+
+// ── Designations (managed list) ──────────────────────────────────────────────
+export function useDesignations() {
+  const { rows, refetch } = useRealtimeTable("designations", "created_at");
+  const add    = async (name) => { const { error } = await supabase.from("designations").insert({ name }); refetch(); return { error }; };
+  const update = async (id, name) => { await supabase.from("designations").update({ name }).eq("id", id); refetch(); };
+  const remove = async (id) => { await supabase.from("designations").update({ active: false }).eq("id", id); refetch(); };
+  return { designations: rows.filter(d=>d.active), allDesignations: rows, addDesignation: add, updateDesignation: update, removeDesignation: remove, refetch };
 }
 
 // ── Leave types & quotas ─────────────────────────────────────────────────────
@@ -193,12 +223,12 @@ export function useNotifications(userId) {
 
 // ── Admin: create new employee ───────────────────────────────────────────────
 // Calls server-side API (keeps admin logged in; uses service role securely)
-export async function createEmployee({ email, password, name, phone, role, team, avatar }) {
+export async function createEmployee({ email, password, name, phone, role, team, avatar, designation, assigned_lead_id }) {
   const { data: { session } } = await supabase.auth.getSession();
   try {
     const res = await fetch("/api/create-employee", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, name, phone, role, team, avatar, callerToken: session?.access_token }),
+      body: JSON.stringify({ email, password, name, phone, role, team, avatar, designation, assigned_lead_id, callerToken: session?.access_token }),
     });
     const result = await res.json();
     if (!res.ok) return { error: { message: result.error || "Failed to create employee" } };

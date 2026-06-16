@@ -3,7 +3,7 @@ import { useAuth } from "./context/AuthContext";
 import { LoginScreen, PasswordResetScreen } from "./Auth";
 import { theme, COMPANY as DEFAULT_COMPANY, roleConfig } from "./theme";
 import { ANMLogo, Avatar, Badge, Card, Button, Input, Sel, Modal, Row, Textarea, fmt, PhotoAvatar, ProgressRing, Skeleton, EmptyState, Confetti } from "./ui";
-import { useProfiles, useAttendance, useLeaves, useReimbursements, useNotifications, useLeaveTypes, useLeaveQuotas, useCompanySettings, sendWhatsApp, uploadAttachment, createEmployee, generateDailySummary, uploadAvatar, updateMyProfile } from "./hooks/useData";
+import { useProfiles, useAttendance, useLeaves, useReimbursements, useNotifications, useLeaveTypes, useLeaveQuotas, useCompanySettings, useDesignations, sendWhatsApp, uploadAttachment, createEmployee, generateDailySummary, uploadAvatar, updateMyProfile } from "./hooks/useData";
 import { exportCSV, exportPDF } from "./export";
 import { ManagementDashboard, AIAssistant, TeamCalendar } from "./Management";
 
@@ -39,6 +39,7 @@ function Portal() {
   const { leaveTypes, allLeaveTypes, addType, updateType, removeType } = useLeaveTypes();
   const { quotas, setQuota } = useLeaveQuotas();
   const { settings, updateSettings } = useCompanySettings();
+  const { designations, allDesignations, addDesignation, updateDesignation, removeDesignation } = useDesignations();
 
   const COMPANY = settings || DEFAULT_COMPANY;
 
@@ -78,21 +79,32 @@ function Portal() {
   const myReimbs = reimbursements.filter(r=>r.user_id===me.id);
 
   // Pending queues — lead sees their assigned employees (by assigned_lead_id OR same team fallback)
-  const myTeamMemberIds = users.filter(u=>u.assigned_lead_id===me.id || (!u.assigned_lead_id && u.team===me.team && u.role==="member")).map(u=>u.id);
-  const pendAttLead = me.role==="lead" ? attendance.filter(a=>a.status==="pending"&&myTeamMemberIds.includes(a.user_id)) : [];
-  const pendAttHR   = me.role==="hr"   ? attendance.filter(a=>a.status==="pending") : [];
-  const pendLeaveLead = me.role==="lead" ? leaves.filter(l=>l.status==="pending_lead"&&l.lead_id===me.id) : [];
+  // ── Approval routing ───────────────────────────────────────────────────
+  // Attendance & Leave: two-step. Staff → pending_lead (their lead recommends) → pending_hr (management approves).
+  //                     Lead own attendance/leave → pending_hr directly (management approves).
+  // A lead recommends items at pending_lead from THEIR assigned staff.
+  const iLeadFor = (submitterId) => {
+    const sub = getUser(submitterId);
+    return sub && sub.role === "member" && sub.assigned_lead_id === me.id;
+  };
+  const pendAttLead   = me.role==="lead" ? attendance.filter(a=>a.status==="pending_lead" && iLeadFor(a.user_id)) : [];
+  const pendAttHR     = me.role==="hr"   ? attendance.filter(a=>a.status==="pending_hr") : [];
+  const pendAtt       = me.role==="lead" ? pendAttLead : pendAttHR;
+  const pendLeaveLead = me.role==="lead" ? leaves.filter(l=>l.status==="pending_lead" && iLeadFor(l.user_id)) : [];
   const pendLeaveHR   = me.role==="hr"   ? leaves.filter(l=>l.status==="pending_hr") : [];
-  const pendReimbLead = me.role==="lead" ? reimbursements.filter(r=>r.status==="pending_lead"&&r.lead_id===me.id) : [];
+  const pendLeave     = me.role==="lead" ? pendLeaveLead : pendLeaveHR;
+  // Reimbursement: lead recommends items assigned to them; HR approves items at pending_hr
+  const pendReimbLead = me.role==="lead" ? reimbursements.filter(r=>r.status==="pending_lead" && r.assigner_id===me.id) : [];
   const pendReimbHR   = me.role==="hr"   ? reimbursements.filter(r=>r.status==="pending_hr") : [];
-  const totalPending = pendAttLead.length+pendAttHR.length+pendLeaveLead.length+pendLeaveHR.length+pendReimbLead.length+pendReimbHR.length;
+  const pendReimb = me.role==="lead" ? pendReimbLead : pendReimbHR;
+  const totalPending = pendAtt.length+pendLeave.length+pendReimb.length;
 
   const isReportRole = ["hr","admin"].includes(me.role);
 
   // ── Actions ───────────────────────────────────────────────────────────
   const doLogin = async (note) => {
     if(todayLog){ showToast("Already logged in today!","error"); return; }
-    const { error } = await attLogin(me.id, note);
+    const { error } = await attLogin(me.id, note, me.role);
     showToast(error?error.message:`Login recorded at ${nowTime()}! Pending approval.`, error?"error":"success");
     setModal(null);
   };
@@ -102,28 +114,31 @@ function Portal() {
     const { error } = await attLogout(todayLog.id);
     showToast(error?error.message:`Logout recorded at ${nowTime()}!`, error?"error":"success");
   };
-  const doReviewAtt = async (item,action,remark) => { await reviewAtt(item.id, item.user_id, action, remark); showToast(action==="approve"?"Attendance approved!":"Attendance rejected.", action==="approve"?"success":"error"); setModal(null); };
+  const doReviewAtt = async (row,action,remark) => {
+    const { finalDecision } = await reviewAtt(row,action,remark);
+    if(finalDecision) showToast(action==="hr_approve"?"Attendance approved!":"Attendance rejected.", action==="hr_approve"?"success":"error");
+    else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
+    setModal(null);
+  };
   const doSubmitLeave = async (data) => {
-    const lead = getUser(me.assigned_lead_id) || users.find(u=>u.role==="lead"&&u.team===me.team);
+    const lead = getUser(me.assigned_lead_id);
     const hr=users.find(u=>u.role==="hr");
-    const { error } = await submitLeave(me.id, lead?.id, hr?.id, data);
+    const { error } = await submitLeave(me.id, lead?.id, hr?.id, data, me.role);
     showToast(error?error.message:"Leave application submitted!", error?"error":"success"); setModal(null);
   };
   const doReviewLeave = async (row,action,comment) => {
     const { finalDecision } = await reviewLeave(row,action,comment);
-    if(finalDecision){ const r=getUser(row.user_id); sendWhatsApp(action==="hr_approve"?"leave_approved":"leave_rejected", r, {leaveType:row.type,fromDate:row.from_date,toDate:row.to_date,days:row.days,hrComment:comment}); showToast(action==="hr_approve"?`Approved! WhatsApp sent to ${r?.name}`:`Rejected. WhatsApp sent.`, action==="hr_approve"?"success":"error"); }
+    if(finalDecision) showToast(action==="hr_approve"?"Leave approved!":"Leave rejected.", action==="hr_approve"?"success":"error");
     else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
     setModal(null);
   };
   const doSubmitReimb = async (data) => {
-    const lead = getUser(me.assigned_lead_id) || users.find(u=>u.role==="lead"&&u.team===me.team);
-    const hr=users.find(u=>u.role==="hr");
-    const { error } = await submitReimb(me.id, lead?.id, hr?.id, data);
+    const { error } = await submitReimb(me.id, data);
     showToast(error?error.message:"Expense claim submitted!", error?"error":"success"); setModal(null);
   };
   const doReviewReimb = async (row,action,comment) => {
     const { finalDecision } = await reviewReimb(row,action,comment);
-    if(finalDecision){ const r=getUser(row.user_id); sendWhatsApp(action==="hr_approve"?"reimbursement_approved":"reimbursement_rejected", r, {amount:row.amount,category:row.category,hrComment:comment}); showToast(action==="hr_approve"?`Approved! WhatsApp sent to ${r?.name}`:`Rejected. WhatsApp sent.`, action==="hr_approve"?"success":"error"); }
+    if(finalDecision) showToast(action==="hr_approve"?"Reimbursement approved!":"Claim rejected.", action==="hr_approve"?"success":"error");
     else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
     setModal(null);
   };
@@ -174,13 +189,13 @@ function Portal() {
       {tab==="attendance"&&<AttendanceTab attendance={myAttend} todayLog={todayLog} setModal={setModal} doLogout={doLogout}/>}
       {tab==="leaves"&&<LeavesTab leaves={myLeaves} leaveTypes={leaveTypes} quotas={quotas} me={me} setModal={setModal}/>}
       {tab==="reimb"&&<ReimbTab reimbursements={myReimbs} setModal={setModal}/>}
-      {tab==="approvals"&&<ApprovalsTab me={me} users={users} pendAtt={me.role==="lead"?pendAttLead:pendAttHR} pendLeave={me.role==="lead"?pendLeaveLead:pendLeaveHR} pendReimb={me.role==="lead"?pendReimbLead:pendReimbHR} setModal={setModal}/>}
+      {tab==="approvals"&&<ApprovalsTab me={me} users={users} pendAtt={pendAtt} pendLeave={pendLeave} pendReimb={pendReimb} setModal={setModal}/>}
       {tab==="reports"&&<ReportsTab users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} COMPANY={COMPANY} showToast={showToast}/>}
-      {tab==="admin"&&<AdminTab me={me} users={users} activeUsers={activeUsers} COMPANY={COMPANY} updateRole={updateRole} updateProfile={updateProfile} setActive={setActive} setLead={setLead} leaveTypes={leaveTypes} allLeaveTypes={allLeaveTypes} addType={addType} updateType={updateType} removeType={removeType} quotas={quotas} setQuota={setQuota} updateSettings={updateSettings} setModal={setModal} showToast={showToast}/>}
-      {tab==="profile"&&<ProfileTab me={me} showToast={showToast} isMobile={isMobile}/>}
-      {tab==="overview"&&<ManagementDashboard users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} setTab={setTab}/>}
+      {tab==="admin"&&<AdminTab me={me} users={users} activeUsers={activeUsers} COMPANY={COMPANY} updateRole={updateRole} updateProfile={updateProfile} setActive={setActive} setLead={setLead} leaveTypes={leaveTypes} allLeaveTypes={allLeaveTypes} addType={addType} updateType={updateType} removeType={removeType} quotas={quotas} setQuota={setQuota} updateSettings={updateSettings} designations={designations} allDesignations={allDesignations} addDesignation={addDesignation} updateDesignation={updateDesignation} removeDesignation={removeDesignation} setModal={setModal} showToast={showToast}/>}
+      {tab==="profile"&&<ProfileTab me={me} showToast={showToast} isMobile={isMobile} designations={designations}/>}
+      {tab==="overview"&&<ManagementDashboard users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} setTab={setTab} lateCutoff={COMPANY.late_cutoff_time||"10:15"}/>}
       {tab==="calendar"&&<TeamCalendar users={users} leaves={leaves} attendance={attendance} isMobile={isMobile}/>}
-      {tab==="assistant"&&<AIAssistant users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile}/>}
+      {tab==="assistant"&&<AIAssistant users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} lateCutoff={COMPANY.late_cutoff_time||"10:15"}/>}
     </div></div>
 
     {!isMobile&&<Footer COMPANY={COMPANY}/>}
@@ -223,12 +238,12 @@ function Portal() {
     })()}
 
     {modal?.type==="login_attendance"&&<LoginAttendanceModal onClose={()=>setModal(null)} onSubmit={doLogin}/>}
-    {modal?.type==="review_attendance"&&<ReviewAttendanceModal onClose={()=>setModal(null)} item={modal.data} users={users} onAction={doReviewAtt}/>}
+    {modal?.type==="review_attendance"&&<ReviewAttendanceModal onClose={()=>setModal(null)} item={modal.data} users={users} me={me} onAction={doReviewAtt}/>}
     {modal?.type==="apply_leave"&&<ApplyLeaveModal onClose={()=>setModal(null)} onSubmit={doSubmitLeave} leaveTypes={leaveTypes}/>}
-    {modal?.type==="apply_reimb"&&<ApplyReimbModal onClose={()=>setModal(null)} onSubmit={doSubmitReimb} me={me} showToast={showToast}/>}
+    {modal?.type==="apply_reimb"&&<ApplyReimbModal onClose={()=>setModal(null)} onSubmit={doSubmitReimb} me={me} users={users} showToast={showToast}/>}
     {modal?.type==="review_leave"&&<ReviewModal onClose={()=>setModal(null)} item={modal.data} users={users} me={me} onAction={doReviewLeave} itemType="leave"/>}
     {modal?.type==="review_reimb"&&<ReviewModal onClose={()=>setModal(null)} item={modal.data} users={users} me={me} onAction={doReviewReimb} itemType="reimb"/>}
-    {modal?.type==="add_employee"&&<AddEmployeeModal onClose={()=>setModal(null)} users={users} showToast={showToast}/>}
+    {modal?.type==="add_employee"&&<AddEmployeeModal onClose={()=>setModal(null)} users={users} designations={designations} showToast={showToast}/>}
 
     {confetti&&<Confetti/>}
     {toast&&<div style={{position:"fixed",bottom:isMobile?80:28,right:isMobile?16:28,left:isMobile?16:"auto",background:toast.type==="success"?theme.green:theme.red,color:"#fff",padding:"12px 22px",borderRadius:10,fontWeight:700,fontSize:14,zIndex:9999,boxShadow:"0 8px 32px #00000022",textAlign:"center"}}>{toast.type==="success"?"✓":"✗"} {toast.msg}</div>}
@@ -274,7 +289,7 @@ function Dashboard({ me, COMPANY, leaves, reimbs, attend, todayLog, totalPending
 // ── Attendance Tab (login + logout) ──────────────────────────────────────────
 function AttendanceTab({ attendance, todayLog, setModal, doLogout }) {
   const approved=attendance.filter(a=>a.status==="approved").length;
-  const pending=attendance.filter(a=>a.status==="pending").length;
+  const pending=attendance.filter(a=>a.status==="pending_lead"||a.status==="pending_hr").length;
   const rejected=attendance.filter(a=>a.status==="rejected").length;
   return <div className="anm-fade">
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20,flexWrap:"wrap",gap:12}}>
@@ -414,38 +429,58 @@ function ReportsTab({ users, attendance, leaves, reimbursements, COMPANY, showTo
 }
 
 // ── Admin Tab ────────────────────────────────────────────────────────────────
-function AdminTab({ me, users, activeUsers, COMPANY, updateRole, updateProfile, setActive, setLead, leaveTypes, allLeaveTypes, addType, updateType, removeType, quotas, setQuota, updateSettings, setModal, showToast }) {
+function AdminTab({ me, users, activeUsers, COMPANY, updateRole, updateProfile, setActive, setLead, leaveTypes, allLeaveTypes, addType, updateType, removeType, quotas, setQuota, updateSettings, designations, allDesignations, addDesignation, updateDesignation, removeDesignation, setModal, showToast }) {
   const [sub,setSub]=useState("employees");
-  const subtabs=[{id:"employees",label:"👥 Employees"},{id:"leavetypes",label:"📅 Leave Types"},{id:"company",label:"🏢 Company Details"}];
+  const subtabs=[{id:"employees",label:"👥 Employees"},{id:"designations",label:"🏷️ Designations"},{id:"leavetypes",label:"📅 Leave Types"},{id:"company",label:"🏢 Company Details"}];
   const leads=users.filter(u=>u.role==="lead");
-  return <div>
+  return <div className="anm-fade">
     <h2 style={{margin:"0 0 6px",fontSize:20,fontWeight:800}}>Admin Panel</h2>
-    <div style={{color:theme.muted,fontSize:13,marginBottom:20}}>Manage employees, leave policy, and company details.</div>
+    <div style={{color:theme.muted,fontSize:13,marginBottom:20}}>Manage employees, designations, leave policy, and company details.</div>
     <div style={{display:"flex",gap:2,marginBottom:24,background:theme.surface,borderRadius:10,padding:4,border:`1px solid ${theme.border}`,width:"fit-content",flexWrap:"wrap"}}>{subtabs.map(t=><button key={t.id} onClick={()=>setSub(t.id)} style={{background:sub===t.id?theme.accent:"transparent",color:sub===t.id?"#fff":theme.muted,border:"none",borderRadius:8,padding:"8px 18px",cursor:"pointer",fontWeight:600,fontSize:13,fontFamily:"inherit"}}>{t.label}</button>)}</div>
 
-    {sub==="employees"&&<EmployeesAdmin users={users} leads={leads} updateRole={updateRole} setActive={setActive} setLead={setLead} leaveTypes={leaveTypes} quotas={quotas} setQuota={setQuota} updateProfile={updateProfile} setModal={setModal}/>}
+    {sub==="employees"&&<EmployeesAdmin users={users} leads={leads} updateRole={updateRole} setActive={setActive} setLead={setLead} leaveTypes={leaveTypes} quotas={quotas} setQuota={setQuota} updateProfile={updateProfile} designations={designations} setModal={setModal}/>}
+    {sub==="designations"&&<DesignationsAdmin allDesignations={allDesignations} addDesignation={addDesignation} updateDesignation={updateDesignation} removeDesignation={removeDesignation} showToast={showToast}/>}
     {sub==="leavetypes"&&<LeaveTypesAdmin allLeaveTypes={allLeaveTypes} addType={addType} updateType={updateType} removeType={removeType} showToast={showToast}/>}
     {sub==="company"&&<CompanyAdmin COMPANY={COMPANY} updateSettings={updateSettings} showToast={showToast}/>}
   </div>;
 }
 
-function EmployeesAdmin({ users, leads, updateRole, setActive, setLead, leaveTypes, quotas, setQuota, updateProfile, setModal }) {
+function DesignationsAdmin({ allDesignations, addDesignation, updateDesignation, removeDesignation, showToast }) {
+  const [name,setName]=useState("");
+  return <div>
+    <Card style={{marginBottom:16}}>
+      <div style={{fontWeight:700,marginBottom:12}}>Add New Designation</div>
+      <div style={{display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}><Input label="Designation Name" value={name} onChange={setName} placeholder="e.g. Consultant" style={{flex:1,minWidth:200}}/><Button onClick={async()=>{if(!name){showToast("Enter a name","error");return;}const{error}=await addDesignation(name);showToast(error?error.message:"Designation added!",error?"error":"success");setName("");}}>Add</Button></div>
+    </Card>
+    <Card>
+      <div style={{fontWeight:700,marginBottom:14}}>Designations</div>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>{allDesignations.map(d=><div key={d.id} style={{display:"flex",alignItems:"center",gap:12,padding:"8px 0",borderBottom:`1px solid ${theme.border}`,opacity:d.active?1:0.5}}><span style={{flex:1,fontWeight:600,fontSize:14}}>{d.name}{!d.active&&<span style={{fontSize:11,color:theme.red,marginLeft:8}}>(removed)</span>}</span>{d.active&&<><input defaultValue={d.name} onBlur={e=>e.target.value!==d.name&&e.target.value.trim()&&updateDesignation(d.id,e.target.value.trim())} style={{width:160,padding:"5px 10px",border:`1px solid ${theme.border}`,borderRadius:6,fontSize:13,fontFamily:"inherit"}}/><Button size="sm" variant="ghost" onClick={()=>removeDesignation(d.id)}>Remove</Button></>}</div>)}</div>
+      <div style={{fontSize:11,color:theme.dim,marginTop:10}}>Edit a name in the box (saves on blur). These appear when assigning a designation to an employee and in profiles.</div>
+    </Card>
+  </div>;
+}
+
+function EmployeesAdmin({ users, leads, updateRole, setActive, setLead, leaveTypes, quotas, setQuota, updateProfile, designations, setModal }) {
   const [expanded,setExpanded]=useState(null);
   return <div>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}><div style={{fontWeight:700,fontSize:15}}>Employees ({users.filter(u=>u.active!==false).length} active)</div><Button onClick={()=>setModal({type:"add_employee"})}>＋ Add Employee</Button></div>
     <div style={{display:"flex",flexDirection:"column",gap:10}}>{users.map(u=><Card key={u.id} style={{opacity:u.active===false?0.55:1}}>
       <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
         <PhotoAvatar user={u} size={40}/>
-        <div style={{flex:1,minWidth:160}}><div style={{fontWeight:600,fontSize:14}}>{u.name} {u.active===false&&<span style={{fontSize:11,color:theme.red,background:theme.redBg,padding:"1px 8px",borderRadius:10,marginLeft:6}}>INACTIVE</span>}</div><div style={{fontSize:12,color:theme.muted}}>{u.email} · {u.team}</div></div>
+        <div style={{flex:1,minWidth:160}}><div style={{fontWeight:600,fontSize:14}}>{u.name} {u.active===false&&<span style={{fontSize:11,color:theme.red,background:theme.redBg,padding:"1px 8px",borderRadius:10,marginLeft:6}}>INACTIVE</span>}</div><div style={{fontSize:12,color:theme.muted}}>{u.email} · {u.designation||u.team}</div></div>
         <select value={u.role} onChange={e=>updateRole(u.id,e.target.value)} style={{background:theme.surface,border:`1px solid ${theme.border}`,borderRadius:8,padding:"6px 10px",color:roleConfig[u.role]?.color,fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:600}}><option value="member">Staff</option><option value="lead">Senior / Lead</option><option value="hr">Management</option><option value="admin">Admin</option></select>
-        <select value={u.assigned_lead_id||""} onChange={e=>setLead(u.id,e.target.value)} style={{background:theme.surface,border:`1px solid ${theme.border}`,borderRadius:8,padding:"6px 10px",color:theme.text,fontSize:12,fontFamily:"inherit",cursor:"pointer"}}><option value="">— Pool Lead —</option>{leads.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select>
-        <Button size="sm" variant="ghost" onClick={()=>setExpanded(expanded===u.id?null:u.id)}>Quotas ▾</Button>
+        {u.role==="member"&&<select value={u.assigned_lead_id||""} onChange={e=>setLead(u.id,e.target.value)} title="Which Senior/Lead approves this staff member" style={{background:theme.surface,border:`1px solid ${theme.border}`,borderRadius:8,padding:"6px 10px",color:theme.text,fontSize:12,fontFamily:"inherit",cursor:"pointer"}}><option value="">— Reports to (Lead) —</option>{leads.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select>}
+        <Button size="sm" variant="ghost" onClick={()=>setExpanded(expanded===u.id?null:u.id)}>Details ▾</Button>
         <Button size="sm" variant={u.active===false?"success":"danger"} onClick={()=>setActive(u.id,u.active===false)}>{u.active===false?"Reactivate":"Deactivate"}</Button>
       </div>
       {expanded===u.id&&<div style={{marginTop:14,padding:14,background:theme.surface,borderRadius:10,border:`1px solid ${theme.border}`}}>
-        <div style={{fontSize:12,fontWeight:700,color:theme.muted,marginBottom:10,textTransform:"uppercase"}}>Leave Quota Overrides for {u.name}</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+          <div><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Designation</label><select value={u.designation||""} onChange={e=>updateProfile(u.id,{designation:e.target.value})} style={{width:"100%",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",cursor:"pointer"}}><option value="">— None —</option>{designations.map(d=><option key={d.id} value={d.name}>{d.name}</option>)}</select></div>
+          <div><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Team</label><input defaultValue={u.team||""} onBlur={e=>e.target.value!==u.team&&updateProfile(u.id,{team:e.target.value})} style={{width:"100%",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+        </div>
+        <div style={{fontSize:12,fontWeight:700,color:theme.muted,marginBottom:10,textTransform:"uppercase"}}>Leave Quota Overrides</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:10}}>{leaveTypes.map(lt=>{const override=quotas.find(q=>q.user_id===u.id&&q.leave_type_id===lt.id);return <div key={lt.id} style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:12,color:theme.text,flex:1}}>{lt.name}</span><input type="number" defaultValue={override?override.qty:lt.default_qty} onBlur={e=>setQuota(u.id,lt.id,parseInt(e.target.value)||0)} style={{width:56,padding:"4px 6px",border:`1px solid ${theme.border}`,borderRadius:6,fontSize:12,fontFamily:"inherit"}}/></div>;})}</div>
-        <div style={{fontSize:11,color:theme.dim,marginTop:8}}>Default shown; change a value to set a per-employee override (saved on blur).</div>
+        <div style={{fontSize:11,color:theme.dim,marginTop:8}}>Quota: default shown; change to set a per-employee override (saved on blur).</div>
       </div>}
     </Card>)}</div>
   </div>;
@@ -466,7 +501,7 @@ function LeaveTypesAdmin({ allLeaveTypes, addType, updateType, removeType, showT
 }
 
 function CompanyAdmin({ COMPANY, updateSettings, showToast }) {
-  const [form,setForm]=useState({name:COMPANY.name||"",tagline:COMPANY.tagline||"",email:COMPANY.email||"",hr_email:COMPANY.hr_email||COMPANY.emailHR||"",phone:COMPANY.phone||"",address:COMPANY.address||""});
+  const [form,setForm]=useState({name:COMPANY.name||"",tagline:COMPANY.tagline||"",email:COMPANY.email||"",hr_email:COMPANY.hr_email||COMPANY.emailHR||"",phone:COMPANY.phone||"",address:COMPANY.address||"",office_start_time:COMPANY.office_start_time||"10:00",late_cutoff_time:COMPANY.late_cutoff_time||"10:15"});
   const f=k=>v=>setForm(p=>({...p,[k]:v}));
   return <Card>
     <div style={{fontWeight:700,marginBottom:16}}>Company Details</div>
@@ -476,6 +511,11 @@ function CompanyAdmin({ COMPANY, updateSettings, showToast }) {
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Input label="Primary Email" value={form.email} onChange={f("email")}/><Input label="HR Manager Email" value={form.hr_email} onChange={f("hr_email")}/></div>
       <Input label="Phone" value={form.phone} onChange={f("phone")}/>
       <Input label="Address" value={form.address} onChange={f("address")}/>
+      <div style={{borderTop:`1px solid ${theme.border}`,paddingTop:16}}>
+        <div style={{fontSize:12,fontWeight:700,color:theme.muted,textTransform:"uppercase",marginBottom:12}}>⏰ Attendance Timing</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Input label="Office Start Time" type="time" value={form.office_start_time} onChange={f("office_start_time")}/><Input label="Late Comer Cutoff" type="time" value={form.late_cutoff_time} onChange={f("late_cutoff_time")}/></div>
+        <div style={{fontSize:11,color:theme.dim,marginTop:8}}>Staff who log in after the cutoff time are flagged as "late comers" in the Management dashboard and AI assistant.</div>
+      </div>
       <Button onClick={async()=>{const{error}=await updateSettings(form);showToast(error?error.message:"Company details updated!",error?"error":"success");}} style={{alignSelf:"flex-start"}}>Save Changes</Button>
     </div>
   </Card>;
@@ -499,9 +539,12 @@ function LoginAttendanceModal({ onClose, onSubmit }) {
   return <Modal open onClose={onClose} title="Log In — Attendance"><div style={{display:"flex",flexDirection:"column",gap:16}}><div style={{background:theme.accentDim,borderRadius:10,padding:"14px 18px",display:"flex",alignItems:"center",gap:12,border:`1px solid ${theme.accent}33`}}><div style={{fontSize:28}}>🕐</div><div><div style={{fontWeight:700,fontSize:15,color:theme.accent}}>{new Date().toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long"})}</div><div style={{fontSize:12,color:theme.muted}}>Login time will be captured as <strong>{nowTime()}</strong></div></div></div><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase",letterSpacing:0.6}}>Note (optional)</label><Textarea value={note} onChange={setNote} placeholder="e.g. Working from client site…"/></div><div style={{fontSize:12,color:theme.muted,background:theme.surface,padding:"10px 14px",borderRadius:8}}>You can log out later to record your end time. Attendance is sent to your Senior for approval.</div><div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={()=>onSubmit(note)}>✓ Log In Now</Button></div></div></Modal>;
 }
 
-function ReviewAttendanceModal({ onClose, item, users, onAction }) {
+function ReviewAttendanceModal({ onClose, item, users, me, onAction }) {
   const [c,setC]=useState("");const sub=users.find(u=>u.id===item.user_id);
-  return <Modal open onClose={onClose} title="Review Attendance"><div style={{display:"flex",flexDirection:"column",gap:16}}><div style={{display:"flex",gap:12,alignItems:"center"}}><PhotoAvatar user={sub} size={46}/><div><div style={{fontWeight:700,fontSize:15}}>{sub?.name}</div><div style={{fontSize:12,color:theme.muted}}>{sub?.team} · {sub?.email}</div></div><div style={{marginLeft:"auto"}}><Badge status={item.status}/></div></div><div style={{background:theme.surface,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:8}}><Row k="Date" v={fmt(item.date)}/><Row k="Login" v={<strong style={{color:theme.green}}>{item.login_time}</strong>}/><Row k="Logout" v={item.logout_time?<strong style={{color:theme.red}}>{item.logout_time}</strong>:"Not logged out"}/><Row k="Note" v={item.note||"—"}/></div><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Remarks</label><Textarea value={c} onChange={setC} placeholder="Optional…"/></div><div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Close</Button><Button variant="danger" onClick={()=>onAction(item,"reject",c)}>✗ Reject</Button><Button variant="success" onClick={()=>onAction(item,"approve",c)}>✓ Approve</Button></div></div></Modal>;
+  const isLead=item.status==="pending_lead"&&me.role==="lead";
+  const isHR=item.status==="pending_hr"&&me.role==="hr";
+  const canAct=isLead||isHR;const prefix=isLead?"lead":"hr";
+  return <Modal open onClose={onClose} title="Review Attendance"><div style={{display:"flex",flexDirection:"column",gap:16}}><div style={{display:"flex",gap:12,alignItems:"center"}}><PhotoAvatar user={sub} size={46}/><div><div style={{fontWeight:700,fontSize:15}}>{sub?.name}</div><div style={{fontSize:12,color:theme.muted}}>{sub?.team} · {sub?.email}</div></div><div style={{marginLeft:"auto"}}><Badge status={item.status}/></div></div><div style={{background:theme.surface,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:8}}><Row k="Date" v={fmt(item.date)}/><Row k="Login" v={<strong style={{color:theme.green}}>{item.login_time}</strong>}/><Row k="Logout" v={item.logout_time?<strong style={{color:theme.red}}>{item.logout_time}</strong>:"Not logged out"}/><Row k="Note" v={item.note||"—"}/></div>{item.lead_comment&&<div style={{fontSize:13,color:theme.purple,background:theme.purpleBg,padding:"8px 12px",borderRadius:8}}>Recommended by senior: "{item.lead_comment}"</div>}{canAct&&<><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Remarks</label><Textarea value={c} onChange={setC} placeholder="Optional…"/></div><div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Close</Button><Button variant="danger" onClick={()=>onAction(item,`${prefix}_reject`,c)}>✗ Reject</Button><Button variant="success" onClick={()=>onAction(item,`${prefix}_approve`,c)}>✓ {isLead?"Recommend":"Approve"}</Button></div></>}{!canAct&&<Button variant="ghost" onClick={onClose} style={{alignSelf:"flex-end"}}>Close</Button>}</div></Modal>;
 }
 
 function ApplyLeaveModal({ onClose, onSubmit, leaveTypes }) {
@@ -511,8 +554,10 @@ function ApplyLeaveModal({ onClose, onSubmit, leaveTypes }) {
   return <Modal open onClose={onClose} title="Apply for Leave"><div style={{display:"flex",flexDirection:"column",gap:16}}><Sel label="Leave Type" value={form.type} onChange={f("type")} options={leaveTypes.map(lt=>({value:lt.name,label:lt.name}))}/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Input label="From" type="date" value={form.from} onChange={f("from")} required/><Input label="To" type="date" value={form.to} onChange={f("to")} required/></div>{days>0&&<div style={{fontSize:13,color:theme.accent,background:theme.accentDim,padding:"8px 12px",borderRadius:8,border:`1px solid ${theme.accent}33`}}>Duration: <strong>{days} day(s)</strong></div>}<div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Reason <span style={{color:theme.red}}>*</span></label><Textarea value={form.reason} onChange={f("reason")} rows={3} placeholder="Brief reason…"/></div><div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={()=>form.from&&form.to&&form.reason&&onSubmit({...form,days})} disabled={!form.from||!form.to||!form.reason}>Submit</Button></div></div></Modal>;
 }
 
-function ApplyReimbModal({ onClose, onSubmit, me, showToast }) {
-  const [form,setForm]=useState({category:"Travel",amount:"",description:"",invoiceNote:""});
+function ApplyReimbModal({ onClose, onSubmit, me, users, showToast }) {
+  // Work-assigner options: pool leads, HR, management (exclude self and plain staff)
+  const assigners = users.filter(u=>["lead","hr","admin"].includes(u.role) && u.id!==me.id && u.active!==false);
+  const [form,setForm]=useState({category:"Travel",amount:"",description:"",invoiceNote:"",assignerId:assigners[0]?.id||""});
   const [files,setFiles]=useState([]);
   const [uploading,setUploading]=useState(false);
   const f=k=>v=>setForm(p=>({...p,[k]:v}));
@@ -528,28 +573,54 @@ function ApplyReimbModal({ onClose, onSubmit, me, showToast }) {
     setFiles(p=>[...p,...uploaded]);
     setUploading(false);
   };
-  return <Modal open onClose={onClose} title="Submit Expense Claim"><div style={{display:"flex",flexDirection:"column",gap:16}}><Sel label="Category" value={form.category} onChange={f("category")} options={["Travel","Food & Entertainment","Accommodation","Office Supplies","Professional Fees","Client Gifts","Training & CPE","Medical","Other"].map(v=>({value:v,label:v}))}/><Input label="Amount (₹)" type="number" value={form.amount} onChange={f("amount")} placeholder="0.00" required/><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Description <span style={{color:theme.red}}>*</span></label><Textarea value={form.description} onChange={f("description")} placeholder="Purpose…"/></div><Input label="Invoice / Receipt Reference" value={form.invoiceNote} onChange={f("invoiceNote")} placeholder="Invoice number…"/>
+  const assigner = assigners.find(u=>u.id===form.assignerId);
+  const assignerRole = assigner?.role;
+  const flowNote = assignerRole==="lead"
+    ? "This Senior/Lead will verify & recommend, then Management approves."
+    : "This Management/HR member will approve your claim directly.";
+  const submit=()=>{
+    if(!form.amount||!form.description){showToast("Amount and description required","error");return;}
+    if(!form.assignerId){showToast("Please select who assigned the work","error");return;}
+    onSubmit({...form,amount:+form.amount,attachments:files,assignerId:form.assignerId,assignerRole});
+  };
+  return <Modal open onClose={onClose} title="Submit Expense Claim"><div style={{display:"flex",flexDirection:"column",gap:16}}>
+    <Sel label="Work Assigned By" value={form.assignerId} onChange={f("assignerId")} options={assigners.map(u=>({value:u.id,label:`${u.name} (${u.role==="lead"?"Senior/Lead":u.role==="hr"?"Management":"Admin"})`}))}/>
+    <div style={{fontSize:12,color:theme.accent,background:theme.accentDim,padding:"8px 12px",borderRadius:8,border:`1px solid ${theme.accent}33`}}>ℹ️ {flowNote}</div>
+    <Sel label="Category" value={form.category} onChange={f("category")} options={["Travel","Food & Entertainment","Accommodation","Office Supplies","Professional Fees","Client Gifts","Training & CPE","Medical","Other"].map(v=>({value:v,label:v}))}/><Input label="Amount (₹)" type="number" value={form.amount} onChange={f("amount")} placeholder="0.00" required/><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Description <span style={{color:theme.red}}>*</span></label><Textarea value={form.description} onChange={f("description")} placeholder="Purpose…"/></div><Input label="Invoice / Receipt Reference" value={form.invoiceNote} onChange={f("invoiceNote")} placeholder="Invoice number…"/>
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
       <label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Attachments (invoice copies)</label>
       <label style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,padding:"16px",border:`2px dashed ${theme.border}`,borderRadius:10,cursor:"pointer",background:theme.surface,fontSize:13,color:theme.accent,fontWeight:600}}>📎 Click to upload files (any type)<input type="file" multiple onChange={handleFiles} style={{display:"none"}}/></label>
       {uploading&&<div style={{fontSize:12,color:theme.amber}}>⏳ Uploading…</div>}
       {files.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>{files.map((file,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,fontSize:12,background:theme.greenBg,padding:"6px 10px",borderRadius:6,border:`1px solid ${theme.green}33`}}><span style={{flex:1,color:theme.text}}>📄 {file.name}</span><span style={{color:theme.muted}}>{(file.size/1024).toFixed(0)} KB</span><button onClick={()=>setFiles(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:theme.red,cursor:"pointer",fontWeight:700}}>✕</button></div>)}</div>}
     </div>
-    <div style={{fontSize:12,color:theme.muted,background:theme.surface,padding:"10px 14px",borderRadius:8}}>📎 Your Senior will verify the attached documents before forwarding to Management.</div><div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={()=>form.amount&&form.description&&onSubmit({...form,amount:+form.amount,attachments:files})} disabled={!form.amount||!form.description||uploading}>Submit</Button></div></div></Modal>;
+    <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={submit} disabled={!form.amount||!form.description||uploading}>Submit</Button></div></div></Modal>;
 }
 
 function ReviewModal({ onClose, item, users, me, onAction, itemType }) {
   const [c,setC]=useState("");const sub=users.find(u=>u.id===item.user_id);
-  const isLead=item.status==="pending_lead"&&me.role==="lead";const isHR=item.status==="pending_hr"&&me.role==="hr";
-  const canAct=isLead||isHR;const prefix=isLead?"lead":"hr";
-  return <Modal open onClose={onClose} title={`Review ${itemType==="leave"?"Leave":"Expense"} Request`}><div style={{display:"flex",flexDirection:"column",gap:16}}><div style={{display:"flex",gap:12,alignItems:"center"}}><PhotoAvatar user={sub} size={46}/><div><div style={{fontWeight:700,fontSize:15}}>{sub?.name}</div><div style={{fontSize:12,color:theme.muted}}>{sub?.team} · {sub?.email}</div></div><div style={{marginLeft:"auto"}}><Badge status={item.status}/></div></div><div style={{background:theme.surface,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:8}}>{itemType==="leave"?<><Row k="Type" v={item.type}/><Row k="Dates" v={`${item.from_date} → ${item.to_date} (${item.days}d)`}/><Row k="Reason" v={item.reason}/></>:<><Row k="Category" v={item.category}/><Row k="Amount" v={`₹${Number(item.amount).toLocaleString("en-IN")}`}/><Row k="Description" v={item.description}/><Row k="Invoice Ref" v={item.invoice_note}/></>}<Row k="Submitted" v={fmt(item.submitted_at)}/></div>
-    {itemType==="reimb"&&(item.attachments||[]).length>0&&<div style={{background:theme.accentDim,borderRadius:10,padding:14,border:`1px solid ${theme.accent}33`}}><div style={{fontSize:12,fontWeight:700,color:theme.accent,marginBottom:8,textTransform:"uppercase"}}>📎 Attached Documents — verify before approving</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{item.attachments.map((file,i)=><a key={i} href={file.url} target="_blank" rel="noreferrer" style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:theme.accent,background:"#fff",padding:"8px 12px",borderRadius:8,textDecoration:"none",border:`1px solid ${theme.border}`,fontWeight:600}}>📄 {file.name} <span style={{marginLeft:"auto",color:theme.muted,fontSize:11}}>Open ↗</span></a>)}</div></div>}
-    {itemType==="reimb"&&(item.attachments||[]).length===0&&<div style={{fontSize:12,color:theme.amber,background:theme.amberBg,padding:"8px 12px",borderRadius:8}}>⚠️ No documents attached to this claim.</div>}
-    {item.lead_comment&&<div style={{fontSize:13,color:theme.purple,background:theme.purpleBg,padding:"8px 12px",borderRadius:8}}>Senior: "{item.lead_comment}"</div>}{canAct&&<><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Remarks</label><Textarea value={c} onChange={setC} placeholder={itemType==="reimb"&&isLead?"Confirm documents verified…":"Optional…"}/></div><div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Close</Button><Button variant="danger" onClick={()=>onAction(item,`${prefix}_reject`,c)}>✗ Reject</Button><Button variant="success" onClick={()=>onAction(item,`${prefix}_approve`,c)}>✓ {isLead?"Verify & Recommend":"Approve"}</Button></div></>}{!canAct&&<Button variant="ghost" onClick={onClose} style={{alignSelf:"flex-end"}}>Close</Button>}</div></Modal>;
+  // Both leave and reimb are two-step: lead recommends (pending_lead) → hr approves (pending_hr).
+  const isLeave = itemType==="leave";
+  const isLead = item.status==="pending_lead" && me.role==="lead";
+  const isHR   = item.status==="pending_hr"   && me.role==="hr";
+  const canAct = isLead||isHR;
+  const prefix = isLead?"lead":"hr";
+  const assigner = item.assigner_id ? users.find(u=>u.id===item.assigner_id) : null;
+  return <Modal open onClose={onClose} title={`Review ${isLeave?"Leave":"Expense"} Request`}><div style={{display:"flex",flexDirection:"column",gap:16}}><div style={{display:"flex",gap:12,alignItems:"center"}}><PhotoAvatar user={sub} size={46}/><div><div style={{fontWeight:700,fontSize:15}}>{sub?.name}</div><div style={{fontSize:12,color:theme.muted}}>{sub?.team} · {sub?.email}</div></div><div style={{marginLeft:"auto"}}><Badge status={item.status}/></div></div><div style={{background:theme.surface,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:8}}>{isLeave?<><Row k="Type" v={item.type}/><Row k="Dates" v={`${item.from_date} → ${item.to_date} (${item.days}d)`}/><Row k="Reason" v={item.reason}/></>:<><Row k="Category" v={item.category}/><Row k="Amount" v={`₹${Number(item.amount).toLocaleString("en-IN")}`}/><Row k="Description" v={item.description}/><Row k="Invoice Ref" v={item.invoice_note}/>{assigner&&<Row k="Work Assigned By" v={assigner.name}/>}</>}<Row k="Submitted" v={fmt(item.submitted_at)}/></div>
+    {!isLeave&&(item.attachments||[]).length>0&&<div style={{background:theme.accentDim,borderRadius:10,padding:14,border:`1px solid ${theme.accent}33`}}><div style={{fontSize:12,fontWeight:700,color:theme.accent,marginBottom:8,textTransform:"uppercase"}}>📎 Attached Documents — verify before approving</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{item.attachments.map((file,i)=><a key={i} href={file.url} target="_blank" rel="noreferrer" style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:theme.accent,background:"#fff",padding:"8px 12px",borderRadius:8,textDecoration:"none",border:`1px solid ${theme.border}`,fontWeight:600}}>📄 {file.name} <span style={{marginLeft:"auto",color:theme.muted,fontSize:11}}>Open ↗</span></a>)}</div></div>}
+    {!isLeave&&(item.attachments||[]).length===0&&<div style={{fontSize:12,color:theme.amber,background:theme.amberBg,padding:"8px 12px",borderRadius:8}}>⚠️ No documents attached to this claim.</div>}
+    {item.lead_comment&&<div style={{fontSize:13,color:theme.purple,background:theme.purpleBg,padding:"8px 12px",borderRadius:8}}>Recommended by senior: "{item.lead_comment}"</div>}
+    {canAct&&<><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Remarks</label><Textarea value={c} onChange={setC} placeholder={!isLeave&&isLead?"Confirm documents verified…":"Optional…"}/></div>
+      <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+        <Button variant="ghost" onClick={onClose}>Close</Button>
+        <Button variant="danger" onClick={()=>onAction(item,`${prefix}_reject`,c)}>✗ Reject</Button>
+        <Button variant="success" onClick={()=>onAction(item,`${prefix}_approve`,c)}>✓ {isLead?(isLeave?"Recommend":"Verify & Recommend"):"Approve"}</Button>
+      </div></>}
+    {!canAct&&<Button variant="ghost" onClick={onClose} style={{alignSelf:"flex-end"}}>Close</Button>}</div></Modal>;
 }
 
-function AddEmployeeModal({ onClose, users, showToast }) {
-  const [form,setForm]=useState({name:"",email:"",password:"Anm@2026",phone:"",role:"member",team:"Audit"});
+function AddEmployeeModal({ onClose, users, designations=[], showToast }) {
+  const leads=users.filter(u=>u.role==="lead"&&u.active!==false);
+  const [form,setForm]=useState({name:"",email:"",password:"Anm@2026",phone:"",role:"member",team:"Audit",designation:"",assigned_lead_id:""});
   const [busy,setBusy]=useState(false);
   const f=k=>v=>setForm(p=>({...p,[k]:v}));
   const avatar=(form.name||"").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()||"NA";
@@ -564,8 +635,9 @@ function AddEmployeeModal({ onClose, users, showToast }) {
   return <Modal open onClose={onClose} title="Add New Employee"><div style={{display:"flex",flexDirection:"column",gap:16}}>
     <Input label="Full Name" value={form.name} onChange={f("name")} placeholder="e.g. Ramesh Kumar" required/>
     <Input label="Email" type="email" value={form.email} onChange={f("email")} placeholder="ramesh@anmoffice.in" required/>
-    <Input label="Phone (for WhatsApp)" value={form.phone} onChange={f("phone")} placeholder="919845012345"/>
+    <Input label="Phone" value={form.phone} onChange={f("phone")} placeholder="919845012345"/>
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Sel label="Role" value={form.role} onChange={f("role")} options={[{value:"member",label:"Staff"},{value:"lead",label:"Senior / Lead"},{value:"hr",label:"Management"},{value:"admin",label:"Admin"}]}/><Input label="Team" value={form.team} onChange={f("team")} placeholder="Audit / Tax…"/></div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Sel label="Designation" value={form.designation} onChange={f("designation")} options={[{value:"",label:"— None —"},...designations.map(d=>({value:d.name,label:d.name}))]}/>{form.role==="member"&&<Sel label="Reports to (Lead)" value={form.assigned_lead_id} onChange={f("assigned_lead_id")} options={[{value:"",label:"— Select Lead —"},...leads.map(l=>({value:l.id,label:l.name}))]}/>}</div>
     <Input label="Default Password" value={form.password} onChange={f("password")}/>
     <div style={{fontSize:12,color:theme.muted,background:theme.surface,padding:"10px 14px",borderRadius:8}}>Employee logs in with this password and is prompted to change it on first login. Avatar: <strong>{avatar}</strong></div>
     <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={submit} disabled={busy||!form.name||!form.email}>{busy?"Adding…":"Add Employee"}</Button></div>
@@ -573,7 +645,7 @@ function AddEmployeeModal({ onClose, users, showToast }) {
 }
 
 // ── Profile Tab (with photo upload) ──────────────────────────────────────────
-function ProfileTab({ me, showToast, isMobile }) {
+function ProfileTab({ me, showToast, isMobile, designations=[] }) {
   const { refreshProfile } = useAuth();
   const [uploading,setUploading]=useState(false);
   const [editing,setEditing]=useState(false);
@@ -622,7 +694,7 @@ function ProfileTab({ me, showToast, isMobile }) {
       <div style={{display:"flex",flexDirection:"column",gap:14}}>
         <DetailRow label="Email" value={me.email} editable={false}/>
         {editing
-          ? <><Input label="Phone" value={form.phone} onChange={f("phone")} placeholder="919845012345"/><Input label="Designation" value={form.designation} onChange={f("designation")} placeholder="e.g. Senior Auditor"/><Input label="Emergency Contact" value={form.emergency_contact} onChange={f("emergency_contact")} placeholder="Name & number"/></>
+          ? <><Input label="Phone" value={form.phone} onChange={f("phone")} placeholder="919845012345"/><Sel label="Designation" value={form.designation} onChange={f("designation")} options={[{value:"",label:"— Select —"},...designations.map(d=>({value:d.name,label:d.name}))]}/><Input label="Emergency Contact" value={form.emergency_contact} onChange={f("emergency_contact")} placeholder="Name & number"/></>
           : <><DetailRow label="Phone" value={me.phone||"Not set"}/><DetailRow label="Designation" value={me.designation||"Not set"}/><DetailRow label="Team" value={me.team}/><DetailRow label="Emergency Contact" value={me.emergency_contact||"Not set"}/>{me.date_joined&&<DetailRow label="Joined" value={fmt(me.date_joined)}/>}</>}
       </div>
     </Card>

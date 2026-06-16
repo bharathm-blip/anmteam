@@ -44,7 +44,11 @@ export default async function handler(req, res) {
   const { data: profiles } = await db.from("profiles").select("id,name,role,team,active");
   const staff = (profiles || []).filter((p) => ["member", "lead"].includes(p.role) && p.active !== false);
 
-  const { data: att } = await db.from("attendance").select("user_id,status").eq("date", date);
+  // Configurable late cutoff
+  const { data: cs } = await db.from("company_settings").select("late_cutoff_time").eq("id", 1).single();
+  const lateCutoff = cs?.late_cutoff_time || "10:15";
+
+  const { data: att } = await db.from("attendance").select("user_id,status,login_time").eq("date", date);
   const loggedIds = new Set((att || []).map((a) => a.user_id));
   const presentIds = new Set((att || []).filter((a) => a.status === "approved").map((a) => a.user_id));
 
@@ -52,6 +56,12 @@ export default async function handler(req, res) {
   const loggedCount = loggedIds.size;
   const absentList = staff.filter((s) => !loggedIds.has(s.id)).map((s) => s.name);
   const pendingAttCount = loggedCount - presentCount;
+
+  // Late comers (logged in after cutoff)
+  const lateList = (att || []).filter((a) => a.login_time && a.login_time > lateCutoff).map((a) => {
+    const u = staff.find((s) => s.id === a.user_id);
+    return u ? `${u.name} (${a.login_time})` : null;
+  }).filter(Boolean);
 
   // Leaves submitted today
   const { data: leaves } = await db.from("leaves").select("user_id,type").gte("submitted_at", `${date}T00:00:00`).lte("submitted_at", `${date}T23:59:59`);
@@ -74,6 +84,7 @@ export default async function handler(req, res) {
   if (pendingAttCount > 0) msg += ` (${pendingAttCount} pending approval)`;
   msg += `\n`;
   msg += absentList.length ? `❌ Absent (${absentList.length}): ${absentList.join(", ")}\n` : `❌ Absent: None 🎉\n`;
+  msg += lateList.length ? `⏰ Late comers (${lateList.length}): ${lateList.join(", ")}\n` : `⏰ Late comers: None\n`;
   msg += leaveNames.length ? `📅 Leave requests: ${leaveNames.join(", ")}\n` : `📅 Leave requests: None\n`;
   msg += reimbNames.length ? `🧾 Reimbursements: ${reimbNames.join(", ")}` : `🧾 Reimbursements: None`;
 

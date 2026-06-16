@@ -12,7 +12,7 @@ import { createClient } from "@supabase/supabase-js";
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { email, password, name, phone, role, team, avatar, callerToken } = req.body;
+  const { email, password, name, phone, role, team, avatar, designation, assigned_lead_id, callerToken } = req.body;
   if (!email || !password || !name) return res.status(400).json({ error: "Missing required fields" });
 
   const url = process.env.SUPABASE_URL;
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
   if (error) return res.status(400).json({ error: error.message });
 
   // Ensure the profile row is correct
-  await admin.from("profiles").update({ name, phone, role, team, avatar, must_reset_pw: true, active: true }).eq("id", data.user.id);
+  await admin.from("profiles").update({ name, phone, role, team, avatar, designation: designation || null, assigned_lead_id: assigned_lead_id || null, must_reset_pw: true, active: true }).eq("id", data.user.id);
 
   return res.status(200).json({ success: true, userId: data.user.id });
 }
