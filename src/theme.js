@@ -10,7 +10,7 @@ export const COMPANY = {
   tagline:"Chartered Accountants | 50 Years of Excellence",
   email:"tax@anmoffice.in", emailHR:"bharath.m@anmoffice.in",
   phone:"+91 8660735588", address:"Pratham, Kuvempu Road, Shivamogga",
-  credits:"Developed by Bharath, Balaji & Sukruthi",
+  credits:"Developed by Bharath",
 };
 export const statusConfig = {
   pending_lead:{label:"Pending Lead",color:theme.amber,dot:"●"},

@@ -1,0 +1,94 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Vercel Serverless Function — /api/daily-summary
+// Computes a day-wise summary and sends it as an in-app notification to all
+// Management (hr) and Admin users.
+//
+// Triggered two ways:
+//   1. Automatically by Vercel Cron (see vercel.json "crons")
+//   2. On-demand from the app (Management/Admin clicks "Generate Summary")
+//
+// Required Vercel env vars:
+//   SUPABASE_URL
+//   SUPABASE_SERVICE_ROLE_KEY
+//   CRON_SECRET  (optional — protects the auto endpoint)
+// ─────────────────────────────────────────────────────────────────────────────
+import { createClient } from "@supabase/supabase-js";
+
+export default async function handler(req, res) {
+  const url = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !serviceKey) return res.status(500).json({ error: "Server not configured" });
+
+  // If called by Vercel Cron, verify the secret (Vercel sends it in the header)
+  const cronSecret = process.env.CRON_SECRET;
+  const isCron = req.headers["authorization"] === `Bearer ${cronSecret}`;
+
+  // For on-demand calls from the app, verify the caller is hr/admin
+  const { date: bodyDate, callerToken } = req.body || {};
+
+  const db = createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
+
+  if (!isCron) {
+    // on-demand: must be hr or admin
+    if (!callerToken) return res.status(401).json({ error: "Not authorized" });
+    const { data: caller } = await db.auth.getUser(callerToken);
+    if (!caller?.user) return res.status(401).json({ error: "Invalid session" });
+    const { data: prof } = await db.from("profiles").select("role").eq("id", caller.user.id).single();
+    if (!["hr", "admin"].includes(prof?.role)) return res.status(403).json({ error: "Only Management/Admin" });
+  }
+
+  // Date to summarize (default: today)
+  const date = bodyDate || new Date().toISOString().split("T")[0];
+
+  // ── Gather data ────────────────────────────────────────────────────────────
+  const { data: profiles } = await db.from("profiles").select("id,name,role,team,active");
+  const staff = (profiles || []).filter((p) => ["member", "lead"].includes(p.role) && p.active !== false);
+
+  const { data: att } = await db.from("attendance").select("user_id,status").eq("date", date);
+  const loggedIds = new Set((att || []).map((a) => a.user_id));
+  const presentIds = new Set((att || []).filter((a) => a.status === "approved").map((a) => a.user_id));
+
+  const presentCount = presentIds.size;
+  const loggedCount = loggedIds.size;
+  const absentList = staff.filter((s) => !loggedIds.has(s.id)).map((s) => s.name);
+  const pendingAttCount = loggedCount - presentCount;
+
+  // Leaves submitted today
+  const { data: leaves } = await db.from("leaves").select("user_id,type").gte("submitted_at", `${date}T00:00:00`).lte("submitted_at", `${date}T23:59:59`);
+  const leaveNames = (leaves || []).map((l) => {
+    const u = staff.find((s) => s.id === l.user_id);
+    return u ? `${u.name} (${l.type})` : null;
+  }).filter(Boolean);
+
+  // Reimbursements submitted today
+  const { data: reimbs } = await db.from("reimbursements").select("user_id,amount").gte("submitted_at", `${date}T00:00:00`).lte("submitted_at", `${date}T23:59:59`);
+  const reimbNames = (reimbs || []).map((r) => {
+    const u = staff.find((s) => s.id === r.user_id);
+    return u ? `${u.name} (₹${Number(r.amount).toLocaleString("en-IN")})` : null;
+  }).filter(Boolean);
+
+  // ── Build the summary message ────────────────────────────────────────────
+  const dateLabel = new Date(date).toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  let msg = `📊 Daily Summary — ${dateLabel}\n`;
+  msg += `✅ Present: ${presentCount}/${staff.length}`;
+  if (pendingAttCount > 0) msg += ` (${pendingAttCount} pending approval)`;
+  msg += `\n`;
+  msg += absentList.length ? `❌ Absent (${absentList.length}): ${absentList.join(", ")}\n` : `❌ Absent: None 🎉\n`;
+  msg += leaveNames.length ? `📅 Leave requests: ${leaveNames.join(", ")}\n` : `📅 Leave requests: None\n`;
+  msg += reimbNames.length ? `🧾 Reimbursements: ${reimbNames.join(", ")}` : `🧾 Reimbursements: None`;
+
+  // ── Send to all hr + admin as in-app notifications ─────────────────────────
+  const recipients = (profiles || []).filter((p) => ["hr", "admin"].includes(p.role) && p.active !== false);
+  if (recipients.length) {
+    const rows = recipients.map((r) => ({ user_id: r.id, type: "summary", message: msg }));
+    await db.from("notifications").insert(rows);
+  }
+
+  return res.status(200).json({
+    success: true,
+    date,
+    summary: { present: presentCount, total: staff.length, absent: absentList, leaves: leaveNames, reimbursements: reimbNames },
+    notified: recipients.length,
+    message: msg,
+  });
+}
