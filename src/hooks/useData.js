@@ -64,7 +64,13 @@ export function useAttendance() {
     if (msg) await supabase.from("notifications").insert({ user_id: row.user_id, type: "attendance", message: msg, ref_id: row.id });
     return { error, finalDecision: action.startsWith("hr_") };
   };
-  return { attendance: rows, login, logout, review, refetch };
+  // Reset: HR/Management/Admin deletes an attendance row so the employee can re-punch
+  const reset = async (rowId, userId) => {
+    const { error } = await supabase.from("attendance").delete().eq("id", rowId);
+    if (!error) await supabase.from("notifications").insert({ user_id: userId, type: "attendance", message: "Your attendance for the day was reset by Management. Please punch in again." });
+    return { error };
+  };
+  return { attendance: rows, login, logout, review, reset, refetch };
 }
 
 // ── Leaves (two-step routed, same as attendance) ─────────────────────────────
@@ -90,7 +96,12 @@ export function useLeaves() {
     if (msg) await supabase.from("notifications").insert({ user_id: row.user_id, type: "leave", message: msg, ref_id: row.id });
     return { error, finalDecision: action.startsWith("hr_") };
   };
-  return { leaves: rows, submit, review, refetch };
+  // Cancel: only the owner can cancel while still pending (not yet finally approved/rejected)
+  const cancel = async (row) => {
+    const { error } = await supabase.from("leaves").delete().eq("id", row.id);
+    return { error };
+  };
+  return { leaves: rows, submit, review, cancel, refetch };
 }
 
 // ── Reimbursements (assigner-based flow) ─────────────────────────────────────
@@ -121,7 +132,12 @@ export function useReimbursements() {
     if (msg) await supabase.from("notifications").insert({ user_id: row.user_id, type: "reimbursement", message: msg, ref_id: row.id });
     return { error, finalDecision: action.startsWith("hr_") };
   };
-  return { reimbursements: rows, submit, review, refetch };
+  // Cancel: owner can cancel while still pending
+  const cancel = async (row) => {
+    const { error } = await supabase.from("reimbursements").delete().eq("id", row.id);
+    return { error };
+  };
+  return { reimbursements: rows, submit, review, cancel, refetch };
 }
 
 // ── File upload to Supabase Storage ──────────────────────────────────────────

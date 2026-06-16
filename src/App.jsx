@@ -32,9 +32,9 @@ function InactiveScreen() {
 function Portal() {
   const { profile: me, logout } = useAuth();
   const { users, updateRole, updatePhone, updateProfile, setActive, setLead } = useProfiles();
-  const { attendance, login: attLogin, logout: attLogout, review: reviewAtt } = useAttendance();
-  const { leaves, submit: submitLeave, review: reviewLeave } = useLeaves();
-  const { reimbursements, submit: submitReimb, review: reviewReimb } = useReimbursements();
+  const { attendance, login: attLogin, logout: attLogout, review: reviewAtt, reset: resetAtt } = useAttendance();
+  const { leaves, submit: submitLeave, review: reviewLeave, cancel: cancelLeave } = useLeaves();
+  const { reimbursements, submit: submitReimb, review: reviewReimb, cancel: cancelReimb } = useReimbursements();
   const { notifications, markAllRead } = useNotifications(me.id);
   const { leaveTypes, allLeaveTypes, addType, updateType, removeType } = useLeaveTypes();
   const { quotas, setQuota } = useLeaveQuotas();
@@ -83,20 +83,26 @@ function Portal() {
   // Attendance & Leave: two-step. Staff → pending_lead (their lead recommends) → pending_hr (management approves).
   //                     Lead own attendance/leave → pending_hr directly (management approves).
   // A lead recommends items at pending_lead from THEIR assigned staff.
+  // HR/Admin can also act on pending_lead items whose submitter has NO assigned lead (fallback, nothing gets stuck).
   const iLeadFor = (submitterId) => {
     const sub = getUser(submitterId);
-    return sub && sub.role === "member" && sub.assigned_lead_id === me.id;
+    if (!sub) return false;
+    if (me.role === "lead") return sub.role === "member" && sub.assigned_lead_id === me.id;
+    // HR & Admin can recommend for orphaned staff (no lead assigned)
+    if (me.role === "hr" || me.role === "admin") return sub.role === "member" && !sub.assigned_lead_id;
+    return false;
   };
-  const pendAttLead   = me.role==="lead" ? attendance.filter(a=>a.status==="pending_lead" && iLeadFor(a.user_id)) : [];
-  const pendAttHR     = me.role==="hr"   ? attendance.filter(a=>a.status==="pending_hr") : [];
-  const pendAtt       = me.role==="lead" ? pendAttLead : pendAttHR;
-  const pendLeaveLead = me.role==="lead" ? leaves.filter(l=>l.status==="pending_lead" && iLeadFor(l.user_id)) : [];
-  const pendLeaveHR   = me.role==="hr"   ? leaves.filter(l=>l.status==="pending_hr") : [];
-  const pendLeave     = me.role==="lead" ? pendLeaveLead : pendLeaveHR;
-  // Reimbursement: lead recommends items assigned to them; HR approves items at pending_hr
+  const canApproveHR = me.role === "hr" || me.role === "admin"; // admin acts as management too
+  const pendAttLead   = ["lead","hr","admin"].includes(me.role) ? attendance.filter(a=>a.status==="pending_lead" && iLeadFor(a.user_id)) : [];
+  const pendAttHR     = canApproveHR ? attendance.filter(a=>a.status==="pending_hr") : [];
+  const pendAtt       = [...pendAttLead, ...pendAttHR];
+  const pendLeaveLead = ["lead","hr","admin"].includes(me.role) ? leaves.filter(l=>l.status==="pending_lead" && iLeadFor(l.user_id)) : [];
+  const pendLeaveHR   = canApproveHR ? leaves.filter(l=>l.status==="pending_hr") : [];
+  const pendLeave     = [...pendLeaveLead, ...pendLeaveHR];
+  // Reimbursement: lead recommends items assigned to them; HR/Admin approves items at pending_hr
   const pendReimbLead = me.role==="lead" ? reimbursements.filter(r=>r.status==="pending_lead" && r.assigner_id===me.id) : [];
-  const pendReimbHR   = me.role==="hr"   ? reimbursements.filter(r=>r.status==="pending_hr") : [];
-  const pendReimb = me.role==="lead" ? pendReimbLead : pendReimbHR;
+  const pendReimbHR   = canApproveHR ? reimbursements.filter(r=>r.status==="pending_hr") : [];
+  const pendReimb = [...pendReimbLead, ...pendReimbHR];
   const totalPending = pendAtt.length+pendLeave.length+pendReimb.length;
 
   const isReportRole = ["hr","admin"].includes(me.role);
@@ -142,6 +148,21 @@ function Portal() {
     else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
     setModal(null);
   };
+  const doCancelLeave = async (row) => {
+    const { error } = await cancelLeave(row);
+    showToast(error?error.message:"Leave application cancelled.", error?"error":"success");
+    setModal(null);
+  };
+  const doCancelReimb = async (row) => {
+    const { error } = await cancelReimb(row);
+    showToast(error?error.message:"Expense claim cancelled.", error?"error":"success");
+    setModal(null);
+  };
+  const doResetAttendance = async (row) => {
+    const { error } = await resetAtt(row.id, row.user_id);
+    showToast(error?error.message:"Attendance reset. Employee can punch again.", error?"error":"success");
+    setModal(null);
+  };
 
   const tabs=[
     {id:"dashboard",label:"Dashboard",icon:"⊞"},
@@ -149,7 +170,7 @@ function Portal() {
     {id:"attendance",label:"Attendance",icon:"🕐"},
     {id:"leaves",label:"Leaves",icon:"📅"},
     {id:"reimb",label:"Expenses",icon:"🧾"},
-    ...(["lead","hr"].includes(me.role)?[{id:"approvals",label:"Approvals",icon:"✅",badge:totalPending}]:[]),
+    ...(["lead","hr","admin"].includes(me.role)?[{id:"approvals",label:"Approvals",icon:"✅",badge:totalPending}]:[]),
     ...(isReportRole?[{id:"calendar",label:"Calendar",icon:"📆"}]:[]),
     ...(isReportRole?[{id:"assistant",label:"Assistant",icon:"🤖"}]:[]),
     ...(isReportRole?[{id:"reports",label:"Reports",icon:"📊"}]:[]),
@@ -158,8 +179,8 @@ function Portal() {
   ];
 
   return <div style={{minHeight:"100vh",background:theme.bg,fontFamily:"'DM Sans','Segoe UI',sans-serif",color:theme.text,display:"flex",flexDirection:"column",paddingBottom:isMobile?72:0}}>
-    {/* Header — compact on mobile */}
-    <div style={{background:theme.navy,borderBottom:`1px solid ${theme.navyMid}`,padding:isMobile?"0 14px":"0 24px",display:"flex",alignItems:"center",gap:isMobile?10:14,height:isMobile?56:62,position:"sticky",top:0,zIndex:100}}>
+    {/* Header — compact on mobile, clears the phone status bar via safe-area */}
+    <div style={{background:theme.navy,borderBottom:`1px solid ${theme.navyMid}`,padding:isMobile?"0 12px":"0 24px",paddingTop:isMobile?"env(safe-area-inset-top)":0,display:"flex",alignItems:"center",gap:isMobile?8:14,height:isMobile?"calc(56px + env(safe-area-inset-top))":62,position:"sticky",top:0,zIndex:100}}>
       <ANMLogo size={isMobile?30:34}/>
       <div style={{lineHeight:1.2,minWidth:0,flex:isMobile?1:"unset"}}>
         <div style={{fontWeight:800,fontSize:isMobile?13:14,color:"#fff",letterSpacing:-0.3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{isMobile?"ANM & Co.":COMPANY.name}</div>
@@ -188,12 +209,12 @@ function Portal() {
       {tab==="dashboard"&&<Dashboard me={me} COMPANY={COMPANY} leaves={myLeaves} reimbs={myReimbs} attend={myAttend} todayLog={todayLog} totalPending={totalPending} setTab={setTab} setModal={setModal} doLogout={doLogout} isMobile={isMobile}/>}
       {tab==="attendance"&&<AttendanceTab attendance={myAttend} todayLog={todayLog} setModal={setModal} doLogout={doLogout}/>}
       {tab==="leaves"&&<LeavesTab leaves={myLeaves} leaveTypes={leaveTypes} quotas={quotas} me={me} setModal={setModal}/>}
-      {tab==="reimb"&&<ReimbTab reimbursements={myReimbs} setModal={setModal}/>}
+      {tab==="reimb"&&<ReimbTab reimbursements={myReimbs} me={me} setModal={setModal}/>}
       {tab==="approvals"&&<ApprovalsTab me={me} users={users} pendAtt={pendAtt} pendLeave={pendLeave} pendReimb={pendReimb} setModal={setModal}/>}
       {tab==="reports"&&<ReportsTab users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} COMPANY={COMPANY} showToast={showToast}/>}
       {tab==="admin"&&<AdminTab me={me} users={users} activeUsers={activeUsers} COMPANY={COMPANY} updateRole={updateRole} updateProfile={updateProfile} setActive={setActive} setLead={setLead} leaveTypes={leaveTypes} allLeaveTypes={allLeaveTypes} addType={addType} updateType={updateType} removeType={removeType} quotas={quotas} setQuota={setQuota} updateSettings={updateSettings} designations={designations} allDesignations={allDesignations} addDesignation={addDesignation} updateDesignation={updateDesignation} removeDesignation={removeDesignation} setModal={setModal} showToast={showToast}/>}
       {tab==="profile"&&<ProfileTab me={me} showToast={showToast} isMobile={isMobile} designations={designations}/>}
-      {tab==="overview"&&<ManagementDashboard users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} setTab={setTab} lateCutoff={COMPANY.late_cutoff_time||"10:15"}/>}
+      {tab==="overview"&&<ManagementDashboard users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} setTab={setTab} lateCutoff={COMPANY.late_cutoff_time||"10:15"} setModal={setModal}/>}
       {tab==="calendar"&&<TeamCalendar users={users} leaves={leaves} attendance={attendance} isMobile={isMobile}/>}
       {tab==="assistant"&&<AIAssistant users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} lateCutoff={COMPANY.late_cutoff_time||"10:15"}/>}
     </div></div>
@@ -243,6 +264,9 @@ function Portal() {
     {modal?.type==="apply_reimb"&&<ApplyReimbModal onClose={()=>setModal(null)} onSubmit={doSubmitReimb} me={me} users={users} showToast={showToast}/>}
     {modal?.type==="review_leave"&&<ReviewModal onClose={()=>setModal(null)} item={modal.data} users={users} me={me} onAction={doReviewLeave} itemType="leave"/>}
     {modal?.type==="review_reimb"&&<ReviewModal onClose={()=>setModal(null)} item={modal.data} users={users} me={me} onAction={doReviewReimb} itemType="reimb"/>}
+    {modal?.type==="cancel_leave"&&<CancelConfirmModal onClose={()=>setModal(null)} onConfirm={()=>doCancelLeave(modal.data)} kind="leave" item={modal.data}/>}
+    {modal?.type==="cancel_reimb"&&<CancelConfirmModal onClose={()=>setModal(null)} onConfirm={()=>doCancelReimb(modal.data)} kind="reimb" item={modal.data}/>}
+    {modal?.type==="reset_attendance"&&<ResetAttendanceModal onClose={()=>setModal(null)} onConfirm={()=>doResetAttendance(modal.data)} item={modal.data} users={users}/>}
     {modal?.type==="add_employee"&&<AddEmployeeModal onClose={()=>setModal(null)} users={users} designations={designations} showToast={showToast}/>}
 
     {confetti&&<Confetti/>}
@@ -318,20 +342,20 @@ function LeavesTab({ leaves, leaveTypes, quotas, me, setModal }) {
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}><h2 style={{margin:0,fontSize:20,fontWeight:800}}>My Leave Applications</h2><Button onClick={()=>setModal({type:"apply_leave"})}>＋ Apply Leave</Button></div>
     <div style={{display:"flex",gap:12,marginBottom:22,flexWrap:"wrap"}}>{leaveTypes.filter(lt=>balForType(lt).total>0).map(lt=>{const {total,taken}=balForType(lt);const left=total-taken;return <Card key={lt.id} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,minWidth:120,flex:1}}><ProgressRing value={left} total={total} size={74} label="left" color={left/total>0.3?theme.accent:theme.red}/><div style={{fontSize:12,fontWeight:600,color:theme.text,textAlign:"center"}}>{lt.name}</div><div style={{fontSize:11,color:theme.muted}}>{taken} used · {total} total</div></Card>;})}</div>
     {leaves.length===0&&<Card><div style={{color:theme.muted}}>No leave applications yet.</div></Card>}
-    <div style={{display:"flex",flexDirection:"column",gap:12}}>{leaves.map(l=><Card key={l.id} style={{display:"flex",gap:16,alignItems:"flex-start"}}><div style={{width:44,height:44,borderRadius:10,background:theme.accentDim,border:`1px solid ${theme.accent}22`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>📅</div><div style={{flex:1}}><div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}><span style={{fontWeight:700}}>{l.type}</span><Badge status={l.status}/></div><div style={{fontSize:13,color:theme.muted,marginBottom:4}}>{l.from_date} → {l.to_date} · {l.days} day(s)</div><div style={{fontSize:13,color:theme.muted}}>{l.reason}</div>{l.lead_comment&&<div style={{fontSize:12,marginTop:8,color:theme.purple,background:theme.purpleBg,padding:"5px 10px",borderRadius:6}}>Senior: "{l.lead_comment}"</div>}{l.hr_comment&&<div style={{fontSize:12,marginTop:4,color:theme.green,background:theme.greenBg,padding:"5px 10px",borderRadius:6}}>Management: "{l.hr_comment}"</div>}</div><div style={{fontSize:11,color:theme.dim,flexShrink:0}}>{fmt(l.submitted_at)}</div></Card>)}</div>
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>{leaves.map(l=><Card key={l.id} style={{display:"flex",gap:16,alignItems:"flex-start"}}><div style={{width:44,height:44,borderRadius:10,background:theme.accentDim,border:`1px solid ${theme.accent}22`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>📅</div><div style={{flex:1}}><div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}><span style={{fontWeight:700}}>{l.type}</span><Badge status={l.status}/></div><div style={{fontSize:13,color:theme.muted,marginBottom:4}}>{l.from_date} → {l.to_date} · {l.days} day(s)</div><div style={{fontSize:13,color:theme.muted}}>{l.reason}</div>{l.lead_comment&&<div style={{fontSize:12,marginTop:8,color:theme.purple,background:theme.purpleBg,padding:"5px 10px",borderRadius:6}}>Senior: "{l.lead_comment}"</div>}{l.hr_comment&&<div style={{fontSize:12,marginTop:4,color:theme.green,background:theme.greenBg,padding:"5px 10px",borderRadius:6}}>Management: "{l.hr_comment}"</div>}{["pending","pending_lead","pending_hr"].includes(l.status)&&<Button size="sm" variant="ghost" onClick={()=>setModal({type:"cancel_leave",data:l})} style={{marginTop:10,color:theme.red,borderColor:`${theme.red}55`}}>✕ Cancel Application</Button>}</div><div style={{fontSize:11,color:theme.dim,flexShrink:0}}>{fmt(l.submitted_at)}</div></Card>)}</div>
   </div>;
 }
 
 // ── Reimb Tab ────────────────────────────────────────────────────────────────
-function ReimbTab({ reimbursements, setModal }) {
+function ReimbTab({ reimbursements, me, setModal }) {
   const total=reimbursements.reduce((a,r)=>a+Number(r.amount),0);
   const approved=reimbursements.filter(r=>r.status==="approved").reduce((a,r)=>a+Number(r.amount),0);
   const pending=reimbursements.filter(r=>r.status.startsWith("pending")).reduce((a,r)=>a+Number(r.amount),0);
-  return <div>
+  return <div className="anm-fade">
     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}><h2 style={{margin:0,fontSize:20,fontWeight:800}}>My Expense Claims</h2><Button onClick={()=>setModal({type:"apply_reimb"})}>＋ Submit Expense</Button></div>
     <div style={{display:"flex",gap:12,marginBottom:22}}>{[{l:"Total Submitted",v:`₹${total.toLocaleString("en-IN")}`,c:theme.accent,bg:theme.accentDim},{l:"Approved",v:`₹${approved.toLocaleString("en-IN")}`,c:theme.green,bg:theme.greenBg},{l:"Pending",v:`₹${pending.toLocaleString("en-IN")}`,c:theme.amber,bg:theme.amberBg}].map(s=><div key={s.l} style={{background:s.bg,border:`1px solid ${s.c}22`,borderRadius:10,padding:"10px 18px",flex:1}}><div style={{fontWeight:800,fontSize:18,color:s.c}}>{s.v}</div><div style={{fontSize:12,color:theme.muted}}>{s.l}</div></div>)}</div>
     {reimbursements.length===0&&<Card><div style={{color:theme.muted}}>No expense claims yet.</div></Card>}
-    <div style={{display:"flex",flexDirection:"column",gap:12}}>{reimbursements.map(r=><Card key={r.id} style={{display:"flex",gap:16,alignItems:"flex-start"}}><div style={{width:44,height:44,borderRadius:10,background:theme.greenBg,border:`1px solid ${theme.green}22`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>🧾</div><div style={{flex:1}}><div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}><span style={{fontWeight:700,fontSize:16}}>₹{Number(r.amount).toLocaleString("en-IN")}</span><span style={{fontSize:11,color:theme.muted,background:theme.surface,padding:"2px 8px",borderRadius:12,border:`1px solid ${theme.border}`}}>{r.category}</span><Badge status={r.status}/></div><div style={{fontSize:13,color:theme.muted,marginBottom:4}}>{r.description}</div>{(r.attachments||[]).length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:6}}>{r.attachments.map((f,i)=><a key={i} href={f.url} target="_blank" rel="noreferrer" style={{fontSize:11,color:theme.accent,background:theme.accentDim,padding:"3px 8px",borderRadius:6,textDecoration:"none",border:`1px solid ${theme.accent}33`}}>📎 {f.name}</a>)}</div>}{r.lead_comment&&<div style={{fontSize:12,marginTop:8,color:theme.purple,background:theme.purpleBg,padding:"5px 10px",borderRadius:6}}>Senior: "{r.lead_comment}"</div>}{r.hr_comment&&<div style={{fontSize:12,marginTop:4,color:theme.green,background:theme.greenBg,padding:"5px 10px",borderRadius:6}}>Management: "{r.hr_comment}"</div>}</div><div style={{fontSize:11,color:theme.dim,flexShrink:0}}>{fmt(r.submitted_at)}</div></Card>)}</div>
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>{reimbursements.map(r=><Card key={r.id} style={{display:"flex",gap:16,alignItems:"flex-start"}}><div style={{width:44,height:44,borderRadius:10,background:theme.greenBg,border:`1px solid ${theme.green}22`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>🧾</div><div style={{flex:1}}><div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}><span style={{fontWeight:700,fontSize:16}}>₹{Number(r.amount).toLocaleString("en-IN")}</span><span style={{fontSize:11,color:theme.muted,background:theme.surface,padding:"2px 8px",borderRadius:12,border:`1px solid ${theme.border}`}}>{r.category}</span><Badge status={r.status}/></div><div style={{fontSize:13,color:theme.muted,marginBottom:4}}>{r.description}</div>{(r.attachments||[]).length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:6}}>{r.attachments.map((f,i)=><a key={i} href={f.url} target="_blank" rel="noreferrer" style={{fontSize:11,color:theme.accent,background:theme.accentDim,padding:"3px 8px",borderRadius:6,textDecoration:"none",border:`1px solid ${theme.accent}33`}}>📎 {f.name}</a>)}</div>}{r.lead_comment&&<div style={{fontSize:12,marginTop:8,color:theme.purple,background:theme.purpleBg,padding:"5px 10px",borderRadius:6}}>Senior: "{r.lead_comment}"</div>}{r.hr_comment&&<div style={{fontSize:12,marginTop:4,color:theme.green,background:theme.greenBg,padding:"5px 10px",borderRadius:6}}>Management: "{r.hr_comment}"</div>}{r.user_id===me.id&&["pending","pending_lead","pending_hr"].includes(r.status)&&<Button size="sm" variant="ghost" onClick={()=>setModal({type:"cancel_reimb",data:r})} style={{marginTop:10,color:theme.red,borderColor:`${theme.red}55`}}>✕ Cancel Claim</Button>}</div><div style={{fontSize:11,color:theme.dim,flexShrink:0}}>{fmt(r.submitted_at)}</div></Card>)}</div>
   </div>;
 }
 
@@ -541,8 +565,8 @@ function LoginAttendanceModal({ onClose, onSubmit }) {
 
 function ReviewAttendanceModal({ onClose, item, users, me, onAction }) {
   const [c,setC]=useState("");const sub=users.find(u=>u.id===item.user_id);
-  const isLead=item.status==="pending_lead"&&me.role==="lead";
-  const isHR=item.status==="pending_hr"&&me.role==="hr";
+  const isLead=item.status==="pending_lead"&&["lead","hr","admin"].includes(me.role);
+  const isHR=item.status==="pending_hr"&&["hr","admin"].includes(me.role);
   const canAct=isLead||isHR;const prefix=isLead?"lead":"hr";
   return <Modal open onClose={onClose} title="Review Attendance"><div style={{display:"flex",flexDirection:"column",gap:16}}><div style={{display:"flex",gap:12,alignItems:"center"}}><PhotoAvatar user={sub} size={46}/><div><div style={{fontWeight:700,fontSize:15}}>{sub?.name}</div><div style={{fontSize:12,color:theme.muted}}>{sub?.team} · {sub?.email}</div></div><div style={{marginLeft:"auto"}}><Badge status={item.status}/></div></div><div style={{background:theme.surface,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:8}}><Row k="Date" v={fmt(item.date)}/><Row k="Login" v={<strong style={{color:theme.green}}>{item.login_time}</strong>}/><Row k="Logout" v={item.logout_time?<strong style={{color:theme.red}}>{item.logout_time}</strong>:"Not logged out"}/><Row k="Note" v={item.note||"—"}/></div>{item.lead_comment&&<div style={{fontSize:13,color:theme.purple,background:theme.purpleBg,padding:"8px 12px",borderRadius:8}}>Recommended by senior: "{item.lead_comment}"</div>}{canAct&&<><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Remarks</label><Textarea value={c} onChange={setC} placeholder="Optional…"/></div><div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Close</Button><Button variant="danger" onClick={()=>onAction(item,`${prefix}_reject`,c)}>✗ Reject</Button><Button variant="success" onClick={()=>onAction(item,`${prefix}_approve`,c)}>✓ {isLead?"Recommend":"Approve"}</Button></div></>}{!canAct&&<Button variant="ghost" onClick={onClose} style={{alignSelf:"flex-end"}}>Close</Button>}</div></Modal>;
 }
@@ -600,8 +624,8 @@ function ReviewModal({ onClose, item, users, me, onAction, itemType }) {
   const [c,setC]=useState("");const sub=users.find(u=>u.id===item.user_id);
   // Both leave and reimb are two-step: lead recommends (pending_lead) → hr approves (pending_hr).
   const isLeave = itemType==="leave";
-  const isLead = item.status==="pending_lead" && me.role==="lead";
-  const isHR   = item.status==="pending_hr"   && me.role==="hr";
+  const isLead = item.status==="pending_lead" && ["lead","hr","admin"].includes(me.role);
+  const isHR   = item.status==="pending_hr"   && ["hr","admin"].includes(me.role);
   const canAct = isLead||isHR;
   const prefix = isLead?"lead":"hr";
   const assigner = item.assigner_id ? users.find(u=>u.id===item.assigner_id) : null;
@@ -616,6 +640,41 @@ function ReviewModal({ onClose, item, users, me, onAction, itemType }) {
         <Button variant="success" onClick={()=>onAction(item,`${prefix}_approve`,c)}>✓ {isLead?(isLeave?"Recommend":"Verify & Recommend"):"Approve"}</Button>
       </div></>}
     {!canAct&&<Button variant="ghost" onClick={onClose} style={{alignSelf:"flex-end"}}>Close</Button>}</div></Modal>;
+}
+
+function ResetAttendanceModal({ onClose, onConfirm, item, users }) {
+  const u = users.find(x=>x.id===item.user_id);
+  return <Modal open onClose={onClose} title="Reset Attendance?">
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div style={{background:theme.amberBg,border:`1px solid ${theme.amber}33`,borderRadius:10,padding:14,fontSize:14,color:theme.text}}>
+        This will delete the attendance record of <strong>{u?.name}</strong> for <strong>{item.date}</strong> so they can punch in again. Use this if they logged in or out by mistake.
+      </div>
+      <div style={{background:theme.surface,borderRadius:10,padding:14,fontSize:13,color:theme.muted}}>
+        Current: In {item.login_time||"—"}{item.logout_time?` · Out ${item.logout_time}`:""} · {item.status}
+      </div>
+      <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+        <Button variant="ghost" onClick={onClose}>Close</Button>
+        <Button variant="danger" onClick={onConfirm}>♻ Reset Attendance</Button>
+      </div>
+    </div>
+  </Modal>;
+}
+
+function CancelConfirmModal({ onClose, onConfirm, kind, item }) {
+  return <Modal open onClose={onClose} title={`Cancel ${kind==="leave"?"Leave Application":"Expense Claim"}?`}>
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div style={{background:theme.redBg,border:`1px solid ${theme.red}33`,borderRadius:10,padding:14,fontSize:14,color:theme.text}}>
+        Are you sure you want to cancel this {kind==="leave"?"leave application":"expense claim"}? This permanently removes it and cannot be undone.
+      </div>
+      <div style={{background:theme.surface,borderRadius:10,padding:14,fontSize:13,color:theme.muted}}>
+        {kind==="leave" ? `${item.type} · ${item.from_date} → ${item.to_date} (${item.days}d)` : `₹${Number(item.amount).toLocaleString("en-IN")} · ${item.category}`}
+      </div>
+      <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+        <Button variant="ghost" onClick={onClose}>Keep It</Button>
+        <Button variant="danger" onClick={onConfirm}>✕ Yes, Cancel</Button>
+      </div>
+    </div>
+  </Modal>;
 }
 
 function AddEmployeeModal({ onClose, users, designations=[], showToast }) {

@@ -8,7 +8,7 @@ const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); r
 // ════════════════════════════════════════════════════════════════════════════
 // MANAGEMENT / HR DASHBOARD
 // ════════════════════════════════════════════════════════════════════════════
-export function ManagementDashboard({ users, attendance, leaves, reimbursements, isMobile, setTab, lateCutoff="10:15" }) {
+export function ManagementDashboard({ users, attendance, leaves, reimbursements, isMobile, setTab, lateCutoff="10:15", setModal }) {
   const today = todayStr();
   const staff = users.filter(u => ["member", "lead"].includes(u.role) && u.active !== false);
 
@@ -104,12 +104,23 @@ export function ManagementDashboard({ users, attendance, leaves, reimbursements,
           : presentToday.slice(0, 8).map(a => { const u = getU(a.user_id); return <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderBottom: `1px solid ${theme.border}` }}><PhotoAvatar user={u} size={30} /><span style={{ fontSize: 13, fontWeight: 600 }}>{u?.name}</span><span style={{ fontSize: 12, color: theme.green, marginLeft: "auto" }}>{a.login_time}</span></div>; })}
       </Card>
     </div>
+
+    {/* Reset attendance — for wrongly punched login/logout */}
+    {setModal && (() => {
+      const todayPunches = todayAtt.filter(a => a.login_time);
+      return <Card style={{ marginTop: 14 }}>
+        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4, color: theme.accent }}>♻ Reset Attendance</div>
+        <div style={{ fontSize: 12, color: theme.muted, marginBottom: 12 }}>If someone punched in/out by mistake today, reset it so they can punch again.</div>
+        {todayPunches.length === 0 ? <div style={{ fontSize: 13, color: theme.muted }}>No attendance punched today yet.</div>
+          : todayPunches.map(a => { const u = getU(a.user_id); return <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: `1px solid ${theme.border}` }}>
+              <PhotoAvatar user={u} size={30} />
+              <div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 600 }}>{u?.name}</div><div style={{ fontSize: 11, color: theme.muted }}>In {a.login_time}{a.logout_time ? ` · Out ${a.logout_time}` : ""} · {a.status}</div></div>
+              <Button size="sm" variant="ghost" onClick={() => setModal({ type: "reset_attendance", data: a })} style={{ color: theme.red, borderColor: `${theme.red}55` }}>Reset</Button>
+            </div>; })}
+      </Card>;
+    })()}
   </div>;
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-// AI ASSISTANT (rule-based natural-language Q&A over the data)
-// ════════════════════════════════════════════════════════════════════════════
 export function AIAssistant({ users, attendance, leaves, reimbursements, isMobile, lateCutoff="10:15" }) {
   const [messages, setMessages] = useState([
     { from: "ai", text: "Hi! I'm your ANM assistant. Ask me about attendance, leaves, or claims. Try one of the suggestions below 👇" },
