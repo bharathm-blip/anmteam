@@ -96,9 +96,13 @@ function Portal() {
     return false;
   };
   const canApproveHR = me.role === "hr" || me.role === "admin"; // admin acts as management too
-  const pendAttLead   = ["lead","hr","admin"].includes(me.role) ? attendance.filter(a=>a.status==="pending_lead" && iLeadFor(a.user_id)) : [];
-  const pendAttHR     = canApproveHR ? attendance.filter(a=>a.status==="pending_hr") : [];
+  // Attendance: SINGLE-STEP. Visible to the assigned pool lead AND to HR/Admin;
+  // any of them approves directly. (matches any 'pending*' status incl. old rows)
+  const isPendingAtt = (s) => s && s.startsWith("pending");
+  const pendAttLead   = me.role==="lead" ? attendance.filter(a=>isPendingAtt(a.status) && iLeadFor(a.user_id)) : [];
+  const pendAttHR     = canApproveHR ? attendance.filter(a=>isPendingAtt(a.status)) : [];
   const pendAtt       = [...pendAttLead, ...pendAttHR];
+  // Leave: two-step. Staff → pending_lead (their lead recommends) → pending_hr (management approves).
   const pendLeaveLead = ["lead","hr","admin"].includes(me.role) ? leaves.filter(l=>l.status==="pending_lead" && iLeadFor(l.user_id)) : [];
   const pendLeaveHR   = canApproveHR ? leaves.filter(l=>l.status==="pending_hr") : [];
   const pendLeave     = [...pendLeaveLead, ...pendLeaveHR];
@@ -113,7 +117,7 @@ function Portal() {
   // ── Actions ───────────────────────────────────────────────────────────
   const doLogin = async (note) => {
     if(todayLog){ showToast("Already logged in today!","error"); return; }
-    const { error } = await attLogin(me.id, note, me.role);
+    const { error } = await attLogin(me.id, note);
     showToast(error?error.message:`Login recorded at ${nowTime()}! Pending approval.`, error?"error":"success");
     setModal(null);
   };
@@ -124,9 +128,8 @@ function Portal() {
     showToast(error?error.message:`Logout recorded at ${nowTime()}!`, error?"error":"success");
   };
   const doReviewAtt = async (row,action,remark) => {
-    const { finalDecision } = await reviewAtt(row,action,remark);
-    if(finalDecision) showToast(action==="hr_approve"?"Attendance approved!":"Attendance rejected.", action==="hr_approve"?"success":"error");
-    else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
+    await reviewAtt(row,action,remark);
+    showToast(action==="approve"?"Attendance approved!":"Attendance rejected.", action==="approve"?"success":"error");
     setModal(null);
   };
   // ── Basecamp mention helpers ────────────────────────────────────────────
@@ -637,10 +640,9 @@ function LoginAttendanceModal({ onClose, onSubmit }) {
 
 function ReviewAttendanceModal({ onClose, item, users, me, onAction }) {
   const [c,setC]=useState("");const sub=users.find(u=>u.id===item.user_id);
-  const isLead=item.status==="pending_lead"&&["lead","hr","admin"].includes(me.role);
-  const isHR=item.status==="pending_hr"&&["hr","admin"].includes(me.role);
-  const canAct=isLead||isHR;const prefix=isLead?"lead":"hr";
-  return <Modal open onClose={onClose} title="Review Attendance"><div style={{display:"flex",flexDirection:"column",gap:16}}><div style={{display:"flex",gap:12,alignItems:"center"}}><PhotoAvatar user={sub} size={46}/><div><div style={{fontWeight:700,fontSize:15}}>{sub?.name}</div><div style={{fontSize:12,color:theme.muted}}>{sub?.team} · {sub?.email}</div></div><div style={{marginLeft:"auto"}}><Badge status={item.status}/></div></div><div style={{background:theme.surface,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:8}}><Row k="Date" v={fmt(item.date)}/><Row k="Login" v={<strong style={{color:theme.green}}>{item.login_time}</strong>}/><Row k="Logout" v={item.logout_time?<strong style={{color:theme.red}}>{item.logout_time}</strong>:"Not logged out"}/><Row k="Note" v={item.note||"—"}/></div>{item.lead_comment&&<div style={{fontSize:13,color:theme.purple,background:theme.purpleBg,padding:"8px 12px",borderRadius:8}}>Recommended by senior: "{item.lead_comment}"</div>}{canAct&&<><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Remarks</label><Textarea value={c} onChange={setC} placeholder="Optional…"/></div><div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Close</Button><Button variant="danger" onClick={()=>onAction(item,`${prefix}_reject`,c)}>✗ Reject</Button><Button variant="success" onClick={()=>onAction(item,`${prefix}_approve`,c)}>✓ {isLead?"Recommend":"Approve"}</Button></div></>}{!canAct&&<Button variant="ghost" onClick={onClose} style={{alignSelf:"flex-end"}}>Close</Button>}</div></Modal>;
+  // Single-step: pool lead / HR / Management can approve or reject directly.
+  const canAct = (item.status && item.status.startsWith("pending")) && ["lead","hr","admin"].includes(me.role);
+  return <Modal open onClose={onClose} title="Review Attendance"><div style={{display:"flex",flexDirection:"column",gap:16}}><div style={{display:"flex",gap:12,alignItems:"center"}}><PhotoAvatar user={sub} size={46}/><div><div style={{fontWeight:700,fontSize:15}}>{sub?.name}</div><div style={{fontSize:12,color:theme.muted}}>{sub?.team} · {sub?.email}</div></div><div style={{marginLeft:"auto"}}><Badge status={item.status}/></div></div><div style={{background:theme.surface,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:8}}><Row k="Date" v={fmt(item.date)}/><Row k="Login" v={<strong style={{color:theme.green}}>{item.login_time}</strong>}/><Row k="Logout" v={item.logout_time?<strong style={{color:theme.red}}>{item.logout_time}</strong>:"Not logged out"}/><Row k="Note" v={item.note||"—"}/></div>{canAct&&<><div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Remarks</label><Textarea value={c} onChange={setC} placeholder="Optional…"/></div><div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Button variant="ghost" onClick={onClose}>Close</Button><Button variant="danger" onClick={()=>onAction(item,"reject",c)}>✗ Reject</Button><Button variant="success" onClick={()=>onAction(item,"approve",c)}>✓ Approve</Button></div></>}{!canAct&&<Button variant="ghost" onClick={onClose} style={{alignSelf:"flex-end"}}>Close</Button>}</div></Modal>;
 }
 
 function ApplyLeaveModal({ onClose, onSubmit, leaveTypes }) {

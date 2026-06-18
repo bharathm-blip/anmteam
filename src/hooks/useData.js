@@ -36,12 +36,10 @@ export function useProfiles() {
 // ── Attendance (login + logout) ──────────────────────────────────────────────
 export function useAttendance() {
   const { rows, refetch } = useRealtimeTable("attendance", "date");
-  // Login: create todays row. submitterRole decides start status:
-  //   staff (member) → pending_lead (lead recommends, then HR approves)
-  //   lead → pending_hr (management approves directly)
-  const login = async (userId, note, submitterRole) => {
-    const startStatus = submitterRole === "member" ? "pending_lead" : "pending_hr";
-    const { error } = await supabase.from("attendance").insert({ user_id: userId, date: today(), login_time: nowTime(), note, status: startStatus });
+  // Login: create todays attendance row with a single 'pending' status.
+  // Approval is single-step: the pool lead OR HR/Management approves directly.
+  const login = async (userId, note) => {
+    const { error } = await supabase.from("attendance").insert({ user_id: userId, date: today(), login_time: nowTime(), note, status: "pending" });
     return { error };
   };
   // Logout: set logout_time = now on todays row
@@ -49,20 +47,12 @@ export function useAttendance() {
     const { error } = await supabase.from("attendance").update({ logout_time: nowTime() }).eq("id", rowId);
     return { error };
   };
-  // Two-step: lead recommends (pending_lead→pending_hr); HR approves (pending_hr→approved)
+  // Single-step approval: pool lead / HR / Management approves (or rejects) directly.
   const review = async (row, action, remark) => {
-    let patch = {};
-    if (action === "lead_approve") patch = { status: "pending_hr", lead_comment: remark, lead_at: new Date().toISOString() };
-    if (action === "lead_reject")  patch = { status: "rejected",    lead_comment: remark, lead_at: new Date().toISOString() };
-    if (action === "hr_approve")   patch = { status: "approved",    approver_remark: remark, approved_at: new Date().toISOString() };
-    if (action === "hr_reject")    patch = { status: "rejected",    approver_remark: remark, approved_at: new Date().toISOString() };
-    const { error } = await supabase.from("attendance").update(patch).eq("id", row.id);
-    let msg = null;
-    if (action === "lead_reject") msg = "Your attendance was not recommended by your senior.";
-    if (action === "hr_approve")  msg = "Your attendance was approved.";
-    if (action === "hr_reject")   msg = "Your attendance was rejected by Management.";
-    if (msg) await supabase.from("notifications").insert({ user_id: row.user_id, type: "attendance", message: msg, ref_id: row.id });
-    return { error, finalDecision: action.startsWith("hr_") };
+    const approved = action === "approve";
+    const { error } = await supabase.from("attendance").update({ status: approved ? "approved" : "rejected", approver_remark: remark, approved_at: new Date().toISOString() }).eq("id", row.id);
+    await supabase.from("notifications").insert({ user_id: row.user_id, type: "attendance", message: approved ? "Your attendance was approved." : "Your attendance was rejected." });
+    return { error, finalDecision: true };
   };
   // Reset: HR/Management/Admin deletes an attendance row so the employee can re-punch
   const reset = async (rowId, userId) => {
