@@ -3,7 +3,7 @@ import { useAuth } from "./context/AuthContext";
 import { LoginScreen, PasswordResetScreen } from "./Auth";
 import { theme, COMPANY as DEFAULT_COMPANY, roleConfig } from "./theme";
 import { ANMLogo, Avatar, Badge, Card, Button, Input, Sel, Modal, Row, Textarea, fmt, PhotoAvatar, ProgressRing, Skeleton, EmptyState, Confetti } from "./ui";
-import { useProfiles, useAttendance, useLeaves, useReimbursements, useNotifications, useLeaveTypes, useLeaveQuotas, useCompanySettings, useDesignations, sendWhatsApp, uploadAttachment, createEmployee, generateDailySummary, uploadAvatar, updateMyProfile, postToBasecamp, basecampAutoMatch } from "./hooks/useData";
+import { useProfiles, useAttendance, useLeaves, useReimbursements, useNotifications, useLeaveTypes, useLeaveQuotas, useCompanySettings, useDesignations, sendWhatsApp, uploadAttachment, createEmployee, generateDailySummary, uploadAvatar, updateMyProfile, postToBasecamp, basecampAutoMatch, basecampTest } from "./hooks/useData";
 import { exportCSV, exportPDF } from "./export";
 import { ManagementDashboard, AIAssistant, TeamCalendar } from "./Management";
 
@@ -565,6 +565,8 @@ function LeaveTypesAdmin({ allLeaveTypes, addType, updateType, removeType, showT
 function BasecampAdmin({ users, showToast }) {
   const [running,setRunning]=useState(false);
   const [report,setReport]=useState(null);
+  const [testing,setTesting]=useState(false);
+  const [testResult,setTestResult]=useState(null);
   const linked=users.filter(u=>u.basecamp_person_id).length;
   const run=async()=>{
     setRunning(true); setReport(null);
@@ -573,16 +575,32 @@ function BasecampAdmin({ users, showToast }) {
     if(res.error||!res.success){ showToast(res.error||"Auto-match failed","error"); setReport({err:res.error||"Failed"}); }
     else { showToast(`Matched ${res.matchedCount}, updated ${res.updatedCount}`,"success"); setReport(res); }
   };
+  const test=async()=>{
+    setTesting(true); setTestResult(null);
+    const res=await basecampTest();
+    setTesting(false);
+    setTestResult(res);
+    if(res.ok) showToast("Test message posted to Basecamp!","success");
+    else showToast(res.error||"Test failed","error");
+  };
   return <div>
     <Card style={{marginBottom:16}}>
       <div style={{fontWeight:700,marginBottom:6}}>🏕️ Basecamp Notifications</div>
       <div style={{fontSize:13,color:theme.muted,marginBottom:14,lineHeight:1.5}}>The portal @mentions people in Basecamp when leaves/claims are applied, recommended, and approved. To do that, each person needs their Basecamp Person ID. Use auto-match to fill these automatically by matching email addresses.</div>
       <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+        <Button onClick={test} disabled={testing} variant="outline">{testing?"Testing…":"🧪 Test Connection"}</Button>
         <Button onClick={run} disabled={running}>{running?"Matching…":"🔄 Auto-match Person IDs"}</Button>
         <span style={{fontSize:13,color:theme.muted}}><strong style={{color:theme.green}}>{linked}</strong> of {users.length} linked</span>
       </div>
-      <div style={{fontSize:11,color:theme.dim,marginTop:10}}>Requires Basecamp to be connected (token + account configured in Vercel). Matching is by email — the Basecamp email must equal the portal email.</div>
+      <div style={{fontSize:11,color:theme.dim,marginTop:10}}>Tip: run "Test Connection" first — it posts a test message to Basecamp and tells you exactly what is wrong if it fails.</div>
     </Card>
+    {testResult&&<Card style={{marginBottom:16,borderLeft:`3px solid ${testResult.ok?theme.green:theme.red}`}}>
+      <div style={{fontWeight:700,marginBottom:8,color:testResult.ok?theme.green:theme.red}}>{testResult.ok?"✅ Connection OK":"❌ Connection problem"}</div>
+      <div style={{fontSize:13,color:theme.text,marginBottom:testResult.hint?6:0}}>{testResult.ok?(testResult.message||"Test message posted. Check your Basecamp board."):(testResult.error||"Unknown error")}</div>
+      {testResult.stage&&!testResult.ok&&<div style={{fontSize:11,color:theme.muted}}>Stage: {testResult.stage}{testResult.httpStatus?` · HTTP ${testResult.httpStatus}`:""}</div>}
+      {testResult.hint&&<div style={{fontSize:12,color:theme.amber,background:theme.amberBg,padding:"8px 12px",borderRadius:8,marginTop:8}}>💡 {testResult.hint}</div>}
+      {testResult.detail&&<pre style={{fontSize:11,color:theme.muted,background:theme.surface,padding:10,borderRadius:8,marginTop:8,overflowX:"auto",whiteSpace:"pre-wrap"}}>{JSON.stringify(testResult.detail,null,2).slice(0,400)}</pre>}
+    </Card>}
     {report&&!report.err&&<Card>
       <div style={{fontWeight:700,marginBottom:12}}>Match Report</div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>

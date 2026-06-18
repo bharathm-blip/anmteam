@@ -283,6 +283,18 @@ export async function basecampAutoMatch() {
   } catch (err) { return { error: err.message }; }
 }
 
+// ── Basecamp: test connection (admin/hr) ─────────────────────────────────────
+export async function basecampTest() {
+  const { data: { session } } = await supabase.auth.getSession();
+  try {
+    const res = await fetch("/api/basecamp-test", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callerToken: session?.access_token }),
+    });
+    return await res.json();
+  } catch (err) { return { error: err.message }; }
+}
+
 // ── WhatsApp ─────────────────────────────────────────────────────────────────
 export async function sendWhatsApp(type, user, data) {
   if (!user?.phone || user.phone.includes("X")) return { skipped: true };
