@@ -270,6 +270,29 @@ export async function generateDailySummary(date) {
   }
 }
 
+// ── Basecamp event feed (with @mentions) ─────────────────────────────────────
+export async function postToBasecamp(title, body, mentionIds) {
+  try {
+    const res = await fetch("/api/basecamp-post", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, body, mentionIds: (mentionIds || []).filter(Boolean) }),
+    });
+    return await res.json();
+  } catch (err) { return { error: err.message }; }
+}
+
+// ── Basecamp: auto-match person IDs by email (admin/hr) ──────────────────────
+export async function basecampAutoMatch() {
+  const { data: { session } } = await supabase.auth.getSession();
+  try {
+    const res = await fetch("/api/basecamp-match", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callerToken: session?.access_token }),
+    });
+    return await res.json();
+  } catch (err) { return { error: err.message }; }
+}
+
 // ── WhatsApp ─────────────────────────────────────────────────────────────────
 export async function sendWhatsApp(type, user, data) {
   if (!user?.phone || user.phone.includes("X")) return { skipped: true };

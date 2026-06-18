@@ -3,7 +3,7 @@ import { useAuth } from "./context/AuthContext";
 import { LoginScreen, PasswordResetScreen } from "./Auth";
 import { theme, COMPANY as DEFAULT_COMPANY, roleConfig } from "./theme";
 import { ANMLogo, Avatar, Badge, Card, Button, Input, Sel, Modal, Row, Textarea, fmt, PhotoAvatar, ProgressRing, Skeleton, EmptyState, Confetti } from "./ui";
-import { useProfiles, useAttendance, useLeaves, useReimbursements, useNotifications, useLeaveTypes, useLeaveQuotas, useCompanySettings, useDesignations, sendWhatsApp, uploadAttachment, createEmployee, generateDailySummary, uploadAvatar, updateMyProfile } from "./hooks/useData";
+import { useProfiles, useAttendance, useLeaves, useReimbursements, useNotifications, useLeaveTypes, useLeaveQuotas, useCompanySettings, useDesignations, sendWhatsApp, uploadAttachment, createEmployee, generateDailySummary, uploadAvatar, updateMyProfile, postToBasecamp, basecampAutoMatch } from "./hooks/useData";
 import { exportCSV, exportPDF } from "./export";
 import { ManagementDashboard, AIAssistant, TeamCalendar } from "./Management";
 
@@ -126,24 +126,54 @@ function Portal() {
     else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
     setModal(null);
   };
+  // ── Basecamp mention helpers ────────────────────────────────────────────
+  const bcId = (u) => u && u.basecamp_person_id;
+  const mgmtBcIds = () => users.filter(u=>["hr","admin"].includes(u.role) && u.active!==false).map(bcId).filter(Boolean);
+
   const doSubmitLeave = async (data) => {
     const lead = getUser(me.assigned_lead_id);
     const hr=users.find(u=>u.role==="hr");
     const { error } = await submitLeave(me.id, lead?.id, hr?.id, data, me.role);
+    if(!error){
+      // notify the pool lead (or management directly if the submitter is a lead)
+      const targets = me.role==="member" ? [bcId(lead)] : mgmtBcIds();
+      postToBasecamp(`📅 ${me.name} applied for ${data.type}`, `${data.from} → ${data.to} (${data.days} day(s)) · ${data.reason}`, targets);
+    }
     showToast(error?error.message:"Leave application submitted!", error?"error":"success"); setModal(null);
   };
   const doReviewLeave = async (row,action,comment) => {
     const { finalDecision } = await reviewLeave(row,action,comment);
+    const applicant = getUser(row.user_id);
+    if(action==="lead_approve"){
+      // recommended → notify admin/HR/management
+      postToBasecamp(`✅ ${me.name} recommended a leave request`, `${applicant?.name}'s ${row.type} (${row.from_date} → ${row.to_date}) awaits Management approval.`, mgmtBcIds());
+    } else if(finalDecision){
+      // approved/rejected → notify the applicant
+      const word = action==="hr_approve" ? "APPROVED ✅" : "REJECTED ❌";
+      postToBasecamp(`Leave ${word} — ${applicant?.name}`, `${row.type} · ${row.from_date} → ${row.to_date}${comment?` · Note: ${comment}`:""}`, [bcId(applicant)]);
+    }
     if(finalDecision) showToast(action==="hr_approve"?"Leave approved!":"Leave rejected.", action==="hr_approve"?"success":"error");
     else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
     setModal(null);
   };
   const doSubmitReimb = async (data) => {
     const { error } = await submitReimb(me.id, data);
+    if(!error){
+      const assigner = getUser(data.assignerId);
+      // notify the work-assigner (lead → recommends; HR/mgmt → approves directly)
+      postToBasecamp(`🧾 ${me.name} submitted an expense claim of ₹${Number(data.amount).toLocaleString("en-IN")}`, `${data.category} · ${data.description} · assigned by ${assigner?.name||"—"}`, [bcId(assigner)]);
+    }
     showToast(error?error.message:"Expense claim submitted!", error?"error":"success"); setModal(null);
   };
   const doReviewReimb = async (row,action,comment) => {
     const { finalDecision } = await reviewReimb(row,action,comment);
+    const applicant = getUser(row.user_id);
+    if(action==="lead_approve"){
+      postToBasecamp(`✅ ${me.name} recommended an expense claim`, `${applicant?.name}'s ₹${Number(row.amount).toLocaleString("en-IN")} (${row.category}) awaits Management approval.`, mgmtBcIds());
+    } else if(finalDecision){
+      const word = action==="hr_approve" ? "APPROVED ✅" : "REJECTED ❌";
+      postToBasecamp(`Reimbursement ${word} — ${applicant?.name}`, `₹${Number(row.amount).toLocaleString("en-IN")} · ${row.category}${comment?` · Note: ${comment}`:""}`, [bcId(applicant)]);
+    }
     if(finalDecision) showToast(action==="hr_approve"?"Reimbursement approved!":"Claim rejected.", action==="hr_approve"?"success":"error");
     else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
     setModal(null);
@@ -455,7 +485,7 @@ function ReportsTab({ users, attendance, leaves, reimbursements, COMPANY, showTo
 // ── Admin Tab ────────────────────────────────────────────────────────────────
 function AdminTab({ me, users, activeUsers, COMPANY, updateRole, updateProfile, setActive, setLead, leaveTypes, allLeaveTypes, addType, updateType, removeType, quotas, setQuota, updateSettings, designations, allDesignations, addDesignation, updateDesignation, removeDesignation, setModal, showToast }) {
   const [sub,setSub]=useState("employees");
-  const subtabs=[{id:"employees",label:"👥 Employees"},{id:"designations",label:"🏷️ Designations"},{id:"leavetypes",label:"📅 Leave Types"},{id:"company",label:"🏢 Company Details"}];
+  const subtabs=[{id:"employees",label:"👥 Employees"},{id:"designations",label:"🏷️ Designations"},{id:"leavetypes",label:"📅 Leave Types"},{id:"company",label:"🏢 Company Details"},{id:"basecamp",label:"🏕️ Basecamp"}];
   const leads=users.filter(u=>u.role==="lead");
   return <div className="anm-fade">
     <h2 style={{margin:"0 0 6px",fontSize:20,fontWeight:800}}>Admin Panel</h2>
@@ -466,6 +496,7 @@ function AdminTab({ me, users, activeUsers, COMPANY, updateRole, updateProfile, 
     {sub==="designations"&&<DesignationsAdmin allDesignations={allDesignations} addDesignation={addDesignation} updateDesignation={updateDesignation} removeDesignation={removeDesignation} showToast={showToast}/>}
     {sub==="leavetypes"&&<LeaveTypesAdmin allLeaveTypes={allLeaveTypes} addType={addType} updateType={updateType} removeType={removeType} showToast={showToast}/>}
     {sub==="company"&&<CompanyAdmin COMPANY={COMPANY} updateSettings={updateSettings} showToast={showToast}/>}
+    {sub==="basecamp"&&<BasecampAdmin users={users} showToast={showToast}/>}
   </div>;
 }
 
@@ -502,6 +533,7 @@ function EmployeesAdmin({ users, leads, updateRole, setActive, setLead, leaveTyp
           <div><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Designation</label><select value={u.designation||""} onChange={e=>updateProfile(u.id,{designation:e.target.value})} style={{width:"100%",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",cursor:"pointer"}}><option value="">— None —</option>{designations.map(d=><option key={d.id} value={d.name}>{d.name}</option>)}</select></div>
           <div><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Team</label><input defaultValue={u.team||""} onBlur={e=>e.target.value!==u.team&&updateProfile(u.id,{team:e.target.value})} style={{width:"100%",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
         </div>
+        <div style={{marginBottom:16}}><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Basecamp Person ID <span style={{color:theme.dim,fontWeight:400,textTransform:"none"}}>(for Basecamp notifications)</span></label><input defaultValue={u.basecamp_person_id||""} onBlur={e=>e.target.value!==(u.basecamp_person_id||"")&&updateProfile(u.id,{basecamp_person_id:e.target.value.trim()})} placeholder="e.g. 49887210" style={{width:"100%",maxWidth:240,background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
         <div style={{fontSize:12,fontWeight:700,color:theme.muted,marginBottom:10,textTransform:"uppercase"}}>Leave Quota Overrides</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:10}}>{leaveTypes.map(lt=>{const override=quotas.find(q=>q.user_id===u.id&&q.leave_type_id===lt.id);return <div key={lt.id} style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:12,color:theme.text,flex:1}}>{lt.name}</span><input type="number" defaultValue={override?override.qty:lt.default_qty} onBlur={e=>setQuota(u.id,lt.id,parseInt(e.target.value)||0)} style={{width:56,padding:"4px 6px",border:`1px solid ${theme.border}`,borderRadius:6,fontSize:12,fontFamily:"inherit"}}/></div>;})}</div>
         <div style={{fontSize:11,color:theme.dim,marginTop:8}}>Quota: default shown; change to set a per-employee override (saved on blur).</div>
@@ -521,6 +553,38 @@ function LeaveTypesAdmin({ allLeaveTypes, addType, updateType, removeType, showT
       <div style={{fontWeight:700,marginBottom:14}}>Leave Types & Default Quotas</div>
       <div style={{display:"flex",flexDirection:"column",gap:8}}>{allLeaveTypes.map(lt=><div key={lt.id} style={{display:"flex",alignItems:"center",gap:12,padding:"8px 0",borderBottom:`1px solid ${theme.border}`,opacity:lt.active?1:0.5}}><span style={{flex:1,fontWeight:600,fontSize:14}}>{lt.name}{!lt.active&&<span style={{fontSize:11,color:theme.red,marginLeft:8}}>(removed)</span>}</span><span style={{fontSize:12,color:theme.muted}}>Default:</span><input type="number" defaultValue={lt.default_qty} onBlur={e=>updateType(lt.id,{default_qty:parseInt(e.target.value)||0})} style={{width:60,padding:"4px 8px",border:`1px solid ${theme.border}`,borderRadius:6,fontSize:13,fontFamily:"inherit"}}/><span style={{fontSize:12,color:theme.muted}}>days/yr</span>{lt.active&&<Button size="sm" variant="ghost" onClick={()=>removeType(lt.id)}>Remove</Button>}</div>)}</div>
     </Card>
+  </div>;
+}
+
+function BasecampAdmin({ users, showToast }) {
+  const [running,setRunning]=useState(false);
+  const [report,setReport]=useState(null);
+  const linked=users.filter(u=>u.basecamp_person_id).length;
+  const run=async()=>{
+    setRunning(true); setReport(null);
+    const res=await basecampAutoMatch();
+    setRunning(false);
+    if(res.error||!res.success){ showToast(res.error||"Auto-match failed","error"); setReport({err:res.error||"Failed"}); }
+    else { showToast(`Matched ${res.matchedCount}, updated ${res.updatedCount}`,"success"); setReport(res); }
+  };
+  return <div>
+    <Card style={{marginBottom:16}}>
+      <div style={{fontWeight:700,marginBottom:6}}>🏕️ Basecamp Notifications</div>
+      <div style={{fontSize:13,color:theme.muted,marginBottom:14,lineHeight:1.5}}>The portal @mentions people in Basecamp when leaves/claims are applied, recommended, and approved. To do that, each person needs their Basecamp Person ID. Use auto-match to fill these automatically by matching email addresses.</div>
+      <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+        <Button onClick={run} disabled={running}>{running?"Matching…":"🔄 Auto-match Person IDs"}</Button>
+        <span style={{fontSize:13,color:theme.muted}}><strong style={{color:theme.green}}>{linked}</strong> of {users.length} linked</span>
+      </div>
+      <div style={{fontSize:11,color:theme.dim,marginTop:10}}>Requires Basecamp to be connected (token + account configured in Vercel). Matching is by email — the Basecamp email must equal the portal email.</div>
+    </Card>
+    {report&&!report.err&&<Card>
+      <div style={{fontWeight:700,marginBottom:12}}>Match Report</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
+        {[{l:"Matched",v:report.matchedCount,c:theme.green},{l:"Newly Updated",v:report.updatedCount,c:theme.accent},{l:"Unmatched",v:(report.unmatched||[]).length,c:theme.amber}].map(s=><div key={s.l} style={{background:theme.surface,border:`1px solid ${theme.border}`,borderRadius:8,padding:12,textAlign:"center"}}><div style={{fontWeight:800,fontSize:22,color:s.c}}>{s.v}</div><div style={{fontSize:11,color:theme.muted}}>{s.l}</div></div>)}
+      </div>
+      {(report.unmatched||[]).length>0&&<div style={{marginBottom:12}}><div style={{fontSize:12,fontWeight:700,color:theme.amber,marginBottom:6,textTransform:"uppercase"}}>⚠️ Portal users not found in Basecamp (check their email)</div>{report.unmatched.map((u,i)=><div key={i} style={{fontSize:13,padding:"4px 0",borderBottom:`1px solid ${theme.border}`}}>{u.name} <span style={{color:theme.muted}}>· {u.email||"no email"}</span></div>)}</div>}
+      {(report.extra||[]).length>0&&<div><div style={{fontSize:12,fontWeight:700,color:theme.muted,marginBottom:6,textTransform:"uppercase"}}>People in Basecamp with no matching portal user</div>{report.extra.slice(0,12).map((u,i)=><div key={i} style={{fontSize:13,padding:"4px 0",borderBottom:`1px solid ${theme.border}`,color:theme.muted}}>{u.name} · {u.email}</div>)}</div>}
+    </Card>}
   </div>;
 }
 

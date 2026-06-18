@@ -13,6 +13,7 @@
 //   CRON_SECRET  (optional — protects the auto endpoint)
 // ─────────────────────────────────────────────────────────────────────────────
 import { createClient } from "@supabase/supabase-js";
+import { getFreshBasecampToken } from "./_basecamp-token.js";
 
 export default async function handler(req, res) {
   const url = process.env.SUPABASE_URL;
@@ -41,7 +42,7 @@ export default async function handler(req, res) {
   const date = bodyDate || new Date().toISOString().split("T")[0];
 
   // ── Gather data ────────────────────────────────────────────────────────────
-  const { data: profiles } = await db.from("profiles").select("id,name,role,team,active");
+  const { data: profiles } = await db.from("profiles").select("id,name,role,team,active,basecamp_person_id");
   const staff = (profiles || []).filter((p) => ["member", "lead"].includes(p.role) && p.active !== false);
 
   // Configurable late cutoff
@@ -93,6 +94,26 @@ export default async function handler(req, res) {
   if (recipients.length) {
     const rows = recipients.map((r) => ({ user_id: r.id, type: "summary", message: msg }));
     await db.from("notifications").insert(rows);
+  }
+
+  // ── Post the summary into Basecamp, @mentioning management/HR/admin ─────────
+  const bcAcct = process.env.BASECAMP_ACCOUNT_ID;
+  const bcProj = process.env.BASECAMP_PROJECT_ID, bcBoard = process.env.BASECAMP_MESSAGE_BOARD_ID;
+  if (bcAcct && bcProj && bcBoard) {
+    try {
+      let bcTok;
+      try { bcTok = await getFreshBasecampToken(db); } catch { bcTok = process.env.BASECAMP_ACCESS_TOKEN; }
+      if (bcTok) {
+        const mentionIds = recipients.map((r) => r.basecamp_person_id).filter(Boolean);
+        const mentions = mentionIds.map((id) => `<bc-attachment content-type="application/vnd.basecamp.mention" data-person-id="${id}"></bc-attachment>`).join(" ");
+        const htmlBody = `<div>${msg.replace(/\n/g, "<br>")}${mentions ? `<br><br>${mentions}` : ""}</div>`;
+        await fetch(`https://3.basecampapi.com/${bcAcct}/buckets/${bcProj}/message_boards/${bcBoard}/messages.json`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${bcTok}`, "Content-Type": "application/json", "User-Agent": "ANM Portal (tax@anmoffice.in)" },
+          body: JSON.stringify({ subject: `📊 Daily Summary — ${date}`, content: htmlBody, status: "active" }),
+        });
+      }
+    } catch (e) { /* non-fatal: summary still saved in-app */ }
   }
 
   return res.status(200).json({
