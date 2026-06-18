@@ -86,10 +86,13 @@ function Portal() {
   // HR/Admin can also act on pending_lead items whose submitter has NO assigned lead (fallback, nothing gets stuck).
   const iLeadFor = (submitterId) => {
     const sub = getUser(submitterId);
-    if (!sub) return false;
-    if (me.role === "lead") return sub.role === "member" && sub.assigned_lead_id === me.id;
-    // HR & Admin can recommend for orphaned staff (no lead assigned)
-    if (me.role === "hr" || me.role === "admin") return sub.role === "member" && !sub.assigned_lead_id;
+    if (!sub || sub.role !== "member") return false;
+    if (me.role === "lead") {
+      // staff who report to me, OR unled staff on my team (fallback so nothing is stuck)
+      return sub.assigned_lead_id === me.id || (!sub.assigned_lead_id && sub.team === me.team);
+    }
+    // HR & Admin can recommend for orphaned staff (no lead assigned anywhere)
+    if (me.role === "hr" || me.role === "admin") return !sub.assigned_lead_id;
     return false;
   };
   const canApproveHR = me.role === "hr" || me.role === "admin"; // admin acts as management too
@@ -584,6 +587,11 @@ function BasecampAdmin({ users, showToast }) {
       </div>
       {(report.unmatched||[]).length>0&&<div style={{marginBottom:12}}><div style={{fontSize:12,fontWeight:700,color:theme.amber,marginBottom:6,textTransform:"uppercase"}}>⚠️ Portal users not found in Basecamp (check their email)</div>{report.unmatched.map((u,i)=><div key={i} style={{fontSize:13,padding:"4px 0",borderBottom:`1px solid ${theme.border}`}}>{u.name} <span style={{color:theme.muted}}>· {u.email||"no email"}</span></div>)}</div>}
       {(report.extra||[]).length>0&&<div><div style={{fontSize:12,fontWeight:700,color:theme.muted,marginBottom:6,textTransform:"uppercase"}}>People in Basecamp with no matching portal user</div>{report.extra.slice(0,12).map((u,i)=><div key={i} style={{fontSize:13,padding:"4px 0",borderBottom:`1px solid ${theme.border}`,color:theme.muted}}>{u.name} · {u.email}</div>)}</div>}
+      {(report.roster||[]).length>0&&<div style={{marginTop:16}}>
+        <div style={{fontSize:12,fontWeight:700,color:theme.accent,marginBottom:6,textTransform:"uppercase"}}>📋 All Basecamp people — copy an ID to paste manually</div>
+        <div style={{fontSize:11,color:theme.muted,marginBottom:8}}>If someone did not auto-match, find them here, copy the number, and paste it into Admin → Employees → that person → Basecamp Person ID.</div>
+        <div style={{maxHeight:280,overflowY:"auto",border:`1px solid ${theme.border}`,borderRadius:8}}>{report.roster.map((p,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 12px",borderBottom:`1px solid ${theme.border}`,fontSize:13}}><div style={{flex:1,minWidth:0}}><div style={{fontWeight:600}}>{p.name}</div><div style={{fontSize:11,color:theme.muted,wordBreak:"break-all"}}>{p.email||"(no email in Basecamp)"}</div></div><code style={{background:theme.surface,border:`1px solid ${theme.border}`,borderRadius:6,padding:"3px 8px",fontSize:12,color:theme.accent,fontWeight:700,cursor:"pointer"}} onClick={()=>{navigator.clipboard&&navigator.clipboard.writeText(p.id);showToast(`Copied ID ${p.id}`,"success");}}>{p.id} 📋</code></div>)}</div>
+      </div>}
     </Card>}
   </div>;
 }

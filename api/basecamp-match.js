@@ -101,5 +101,6 @@ export default async function handler(req, res) {
     matched,
     unmatched,
     extra,
+    roster: people.map((p) => ({ id: String(p.id), name: p.name, email: p.email_address || "" })),
   });
 }
