@@ -42,11 +42,11 @@ export default async function handler(req, res) {
   const date = bodyDate || new Date().toISOString().split("T")[0];
 
   // ── Gather data ────────────────────────────────────────────────────────────
-  const { data: profiles } = await db.from("profiles").select("id,name,role,team,active,basecamp_person_id");
+  const { data: profiles } = await db.from("profiles").select("id,name,role,team,active,basecamp_person_id,phone");
   const staff = (profiles || []).filter((p) => ["member", "lead"].includes(p.role) && p.active !== false);
 
   // Configurable late cutoff
-  const { data: cs } = await db.from("company_settings").select("late_cutoff_time").eq("id", 1).single();
+  const { data: cs } = await db.from("company_settings").select("late_cutoff_time, daily_summary_intro, whatsapp_enabled, whatsapp_types").eq("id", 1).single();
   const lateCutoff = cs?.late_cutoff_time || "10:15";
 
   const { data: att } = await db.from("attendance").select("user_id,status,login_time").eq("date", date);
@@ -80,7 +80,8 @@ export default async function handler(req, res) {
 
   // ── Build the summary message ────────────────────────────────────────────
   const dateLabel = new Date(date).toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-  let msg = `📊 Daily Summary — ${dateLabel}\n`;
+  const intro = (cs && cs.daily_summary_intro && cs.daily_summary_intro.trim()) ? `${cs.daily_summary_intro.trim()}\n\n` : "";
+  let msg = `${intro}📊 Daily Summary — ${dateLabel}\n`;
   msg += `✅ Present: ${presentCount}/${staff.length}`;
   if (pendingAttCount > 0) msg += ` (${pendingAttCount} pending approval)`;
   msg += `\n`;
@@ -114,6 +115,30 @@ export default async function handler(req, res) {
         });
       }
     } catch (e) { /* non-fatal: summary still saved in-app */ }
+  }
+
+  // ── WhatsApp the summary to management (uses the daily_summary template) ─────
+  const waEnabled = cs?.whatsapp_enabled && (cs?.whatsapp_types?.daily_summary !== false);
+  const waToken = process.env.WHATSAPP_TOKEN, waPhoneId = process.env.WHATSAPP_PHONE_ID;
+  if (waEnabled && waToken && waPhoneId) {
+    const waUrl = `https://graph.facebook.com/v19.0/${waPhoneId}/messages`;
+    for (const r of recipients) {
+      if (!r.phone || String(r.phone).includes("X")) continue;
+      try {
+        await fetch(waUrl, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${waToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messaging_product: "whatsapp", to: r.phone, type: "template",
+            template: { name: "daily_summary", language: { code: "en" }, components: [{ type: "body", parameters: [
+              { type: "text", text: (r.name || "Team").split(" ")[0] },
+              { type: "text", text: dateLabel },
+              { type: "text", text: msg.replace(/\n/g, " · ").slice(0, 900) },
+            ] }] },
+          }),
+        });
+      } catch (e) { /* non-fatal */ }
+    }
   }
 
   return res.status(200).json({

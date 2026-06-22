@@ -91,6 +91,83 @@ export default async function handler(req, res) {
         ]
       }]
     };
+  } else if (type === "leave_applied") {
+    // To the approver. {{1}}=approver, {{2}}=applicant, {{3}}=type, {{4}}=from, {{5}}=to, {{6}}=days
+    templatePayload = {
+      name: "leave_applied",
+      language: { code: "en" },
+      components: [{
+        type: "body",
+        parameters: [
+          { type: "text", text: recipientName },
+          { type: "text", text: data.applicant || "A team member" },
+          { type: "text", text: data.leaveType || "Leave" },
+          { type: "text", text: data.fromDate || "-" },
+          { type: "text", text: data.toDate || "-" },
+          { type: "text", text: String(data.days || "-") },
+        ]
+      }]
+    };
+  } else if (type === "reimbursement_applied") {
+    // To the approver. {{1}}=approver, {{2}}=applicant, {{3}}=amount, {{4}}=category
+    templatePayload = {
+      name: "reimbursement_applied",
+      language: { code: "en" },
+      components: [{
+        type: "body",
+        parameters: [
+          { type: "text", text: recipientName },
+          { type: "text", text: data.applicant || "A team member" },
+          { type: "text", text: (Number(data.amount) || 0).toLocaleString("en-IN") },
+          { type: "text", text: data.category || "-" },
+        ]
+      }]
+    };
+  } else if (type === "leave_recommended") {
+    // To management. {{1}}=manager, {{2}}=applicant, {{3}}=type, {{4}}=from, {{5}}=to
+    templatePayload = {
+      name: "leave_recommended",
+      language: { code: "en" },
+      components: [{
+        type: "body",
+        parameters: [
+          { type: "text", text: recipientName },
+          { type: "text", text: data.applicant || "A team member" },
+          { type: "text", text: data.leaveType || "Leave" },
+          { type: "text", text: data.fromDate || "-" },
+          { type: "text", text: data.toDate || "-" },
+        ]
+      }]
+    };
+  } else if (type === "reimbursement_recommended") {
+    // To management. {{1}}=manager, {{2}}=applicant, {{3}}=amount, {{4}}=category
+    templatePayload = {
+      name: "reimbursement_recommended",
+      language: { code: "en" },
+      components: [{
+        type: "body",
+        parameters: [
+          { type: "text", text: recipientName },
+          { type: "text", text: data.applicant || "A team member" },
+          { type: "text", text: (Number(data.amount) || 0).toLocaleString("en-IN") },
+          { type: "text", text: data.category || "-" },
+        ]
+      }]
+    };
+  } else if (type === "daily_summary") {
+    // To management. {{1}}=manager, {{2}}=date, {{3}}=summary body
+    templatePayload = {
+      name: "daily_summary",
+      language: { code: "en" },
+      components: [{
+        type: "body",
+        parameters: [
+          { type: "text", text: recipientName },
+          { type: "text", text: data.date || "" },
+          { type: "text", text: data.summary || "" },
+        ]
+      }]
+    };
   } else {
     return res.status(400).json({ error: `Unknown notification type: ${type}` });
   }

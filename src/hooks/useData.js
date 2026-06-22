@@ -141,13 +141,31 @@ export async function uploadAttachment(userId, file) {
 }
 
 // ── Profile photo upload ─────────────────────────────────────────────────────
+// Shrink an image file to a small square-ish JPEG (max 256px) before upload,
+// so avatars are ~20-40KB instead of multi-MB phone photos.
+async function compressImage(file, maxSize = 256, quality = 0.8) {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
+    const w = Math.round(bitmap.width * scale), h = Math.round(bitmap.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", quality));
+    if (!blob) return file;
+    return new File([blob], "avatar.jpg", { type: "image/jpeg" });
+  } catch (e) {
+    return file; // if anything fails, fall back to the original
+  }
+}
+
 export async function uploadAvatar(userId, file) {
-  const ext = file.name.split(".").pop();
-  const path = `${userId}/avatar-${Date.now()}.${ext}`;
-  const { error } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
+  const compressed = await compressImage(file);
+  const path = `${userId}/avatar-${Date.now()}.jpg`;
+  const { error } = await supabase.storage.from("avatars").upload(path, compressed, { upsert: true, contentType: "image/jpeg" });
   if (error) return { error };
   const { data } = supabase.storage.from("avatars").getPublicUrl(path);
-  // save to profile
   await supabase.from("profiles").update({ photo_url: data.publicUrl }).eq("id", userId);
   return { url: data.publicUrl };
 }
@@ -290,6 +308,18 @@ export async function basecampTest() {
     const res = await fetch("/api/basecamp-test", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ callerToken: session?.access_token }),
+    });
+    return await res.json();
+  } catch (err) { return { error: err.message }; }
+}
+
+// ── Bulk announcement: in-app notification to all active staff + Basecamp post ─
+export async function sendAnnouncement(title, message, alsoBasecamp) {
+  const { data: { session } } = await supabase.auth.getSession();
+  try {
+    const res = await fetch("/api/announce", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callerToken: session?.access_token, title, message, alsoBasecamp }),
     });
     return await res.json();
   } catch (err) { return { error: err.message }; }

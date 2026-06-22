@@ -1,11 +1,16 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { useAuth } from "./context/AuthContext";
 import { LoginScreen, PasswordResetScreen } from "./Auth";
 import { theme, COMPANY as DEFAULT_COMPANY, roleConfig } from "./theme";
 import { ANMLogo, Avatar, Badge, Card, Button, Input, Sel, Modal, Row, Textarea, fmt, PhotoAvatar, ProgressRing, Skeleton, EmptyState, Confetti } from "./ui";
-import { useProfiles, useAttendance, useLeaves, useReimbursements, useNotifications, useLeaveTypes, useLeaveQuotas, useCompanySettings, useDesignations, sendWhatsApp, uploadAttachment, createEmployee, generateDailySummary, uploadAvatar, updateMyProfile, postToBasecamp, basecampAutoMatch, basecampTest } from "./hooks/useData";
-import { exportCSV, exportPDF } from "./export";
-import { ManagementDashboard, AIAssistant, TeamCalendar } from "./Management";
+import { useProfiles, useAttendance, useLeaves, useReimbursements, useNotifications, useLeaveTypes, useLeaveQuotas, useCompanySettings, useDesignations, sendWhatsApp, uploadAttachment, createEmployee, generateDailySummary, uploadAvatar, updateMyProfile, postToBasecamp, basecampAutoMatch, basecampTest, sendAnnouncement } from "./hooks/useData";
+// exportCSV/exportPDF are dynamically imported on click (Reports tab only),
+// keeping them out of the main bundle that staff phones load.
+// Heavy management-only views are lazy-loaded so regular staff phones never
+// download this code — big win for first-load time on mobile.
+const ManagementDashboard = lazy(() => import("./Management").then(m => ({ default: m.ManagementDashboard })));
+const AIAssistant = lazy(() => import("./Management").then(m => ({ default: m.AIAssistant })));
+const TeamCalendar = lazy(() => import("./Management").then(m => ({ default: m.TeamCalendar })));
 
 const todayStr = () => new Date().toISOString().split("T")[0];
 const nowTime = () => { const d=new Date(); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; };
@@ -134,7 +139,12 @@ function Portal() {
   };
   // ── Basecamp mention helpers ────────────────────────────────────────────
   const bcId = (u) => u && u.basecamp_person_id;
-  const mgmtBcIds = () => users.filter(u=>["hr","admin"].includes(u.role) && u.active!==false).map(bcId).filter(Boolean);
+  const mgmtUsers = () => users.filter(u=>["hr","admin"].includes(u.role) && u.active!==false);
+  const mgmtBcIds = () => mgmtUsers().map(bcId).filter(Boolean);
+  // WhatsApp gate: only send if globally enabled AND this category is on
+  const waOn = (category) => COMPANY.whatsapp_enabled && (COMPANY.whatsapp_types?.[category] !== false);
+  const wa = (category, type, user, data) => { if(waOn(category) && user) sendWhatsApp(type, user, data); };
+  const waMgmt = (category, type, data) => { if(waOn(category)) mgmtUsers().forEach(m => sendWhatsApp(type, m, data)); };
 
   const doSubmitLeave = async (data) => {
     const lead = getUser(me.assigned_lead_id);
@@ -144,6 +154,10 @@ function Portal() {
       // notify the pool lead (or management directly if the submitter is a lead)
       const targets = me.role==="member" ? [bcId(lead)] : mgmtBcIds();
       postToBasecamp(`📅 ${me.name} applied for ${data.type}`, `${data.from} → ${data.to} (${data.days} day(s)) · ${data.reason}`, targets);
+      // WhatsApp to the approver(s)
+      const waData = { applicant: me.name, leaveType: data.type, fromDate: data.from, toDate: data.to, days: data.days };
+      if(me.role==="member" && lead) wa("applied","leave_applied", lead, waData);
+      else waMgmt("applied","leave_applied", waData);
     }
     showToast(error?error.message:"Leave application submitted!", error?"error":"success"); setModal(null);
   };
@@ -153,10 +167,12 @@ function Portal() {
     if(action==="lead_approve"){
       // recommended → notify admin/HR/management
       postToBasecamp(`✅ ${me.name} recommended a leave request`, `${applicant?.name}'s ${row.type} (${row.from_date} → ${row.to_date}) awaits Management approval.`, mgmtBcIds());
+      waMgmt("recommended","leave_recommended", { applicant: applicant?.name, leaveType: row.type, fromDate: row.from_date, toDate: row.to_date });
     } else if(finalDecision){
       // approved/rejected → notify the applicant
       const word = action==="hr_approve" ? "APPROVED ✅" : "REJECTED ❌";
       postToBasecamp(`Leave ${word} — ${applicant?.name}`, `${row.type} · ${row.from_date} → ${row.to_date}${comment?` · Note: ${comment}`:""}`, [bcId(applicant)]);
+      wa("approved_rejected", action==="hr_approve"?"leave_approved":"leave_rejected", applicant, { leaveType: row.type, fromDate: row.from_date, toDate: row.to_date, days: row.days, hrComment: comment });
     }
     if(finalDecision) showToast(action==="hr_approve"?"Leave approved!":"Leave rejected.", action==="hr_approve"?"success":"error");
     else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
@@ -168,6 +184,7 @@ function Portal() {
       const assigner = getUser(data.assignerId);
       // notify the work-assigner (lead → recommends; HR/mgmt → approves directly)
       postToBasecamp(`🧾 ${me.name} submitted an expense claim of ₹${Number(data.amount).toLocaleString("en-IN")}`, `${data.category} · ${data.description} · assigned by ${assigner?.name||"—"}`, [bcId(assigner)]);
+      if(assigner) wa("applied","reimbursement_applied", assigner, { applicant: me.name, amount: data.amount, category: data.category });
     }
     showToast(error?error.message:"Expense claim submitted!", error?"error":"success"); setModal(null);
   };
@@ -176,9 +193,11 @@ function Portal() {
     const applicant = getUser(row.user_id);
     if(action==="lead_approve"){
       postToBasecamp(`✅ ${me.name} recommended an expense claim`, `${applicant?.name}'s ₹${Number(row.amount).toLocaleString("en-IN")} (${row.category}) awaits Management approval.`, mgmtBcIds());
+      waMgmt("recommended","reimbursement_recommended", { applicant: applicant?.name, amount: row.amount, category: row.category });
     } else if(finalDecision){
       const word = action==="hr_approve" ? "APPROVED ✅" : "REJECTED ❌";
       postToBasecamp(`Reimbursement ${word} — ${applicant?.name}`, `₹${Number(row.amount).toLocaleString("en-IN")} · ${row.category}${comment?` · Note: ${comment}`:""}`, [bcId(applicant)]);
+      wa("approved_rejected", action==="hr_approve"?"reimbursement_approved":"reimbursement_rejected", applicant, { amount: row.amount, category: row.category, hrComment: comment });
     }
     if(finalDecision) showToast(action==="hr_approve"?"Reimbursement approved!":"Claim rejected.", action==="hr_approve"?"success":"error");
     else showToast(action.includes("approve")?"Recommended for Management!":"Rejected.", action.includes("approve")?"success":"error");
@@ -247,12 +266,12 @@ function Portal() {
       {tab==="leaves"&&<LeavesTab leaves={myLeaves} leaveTypes={leaveTypes} quotas={quotas} me={me} setModal={setModal}/>}
       {tab==="reimb"&&<ReimbTab reimbursements={myReimbs} me={me} setModal={setModal}/>}
       {tab==="approvals"&&<ApprovalsTab me={me} users={users} pendAtt={pendAtt} pendLeave={pendLeave} pendReimb={pendReimb} setModal={setModal}/>}
-      {tab==="reports"&&<ReportsTab users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} COMPANY={COMPANY} showToast={showToast}/>}
+      {tab==="reports"&&<ReportsTab users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} COMPANY={COMPANY} showToast={showToast} lateCutoff={COMPANY.late_cutoff_time||"10:15"}/>}
       {tab==="admin"&&<AdminTab me={me} users={users} activeUsers={activeUsers} COMPANY={COMPANY} updateRole={updateRole} updateProfile={updateProfile} setActive={setActive} setLead={setLead} leaveTypes={leaveTypes} allLeaveTypes={allLeaveTypes} addType={addType} updateType={updateType} removeType={removeType} quotas={quotas} setQuota={setQuota} updateSettings={updateSettings} designations={designations} allDesignations={allDesignations} addDesignation={addDesignation} updateDesignation={updateDesignation} removeDesignation={removeDesignation} setModal={setModal} showToast={showToast}/>}
       {tab==="profile"&&<ProfileTab me={me} showToast={showToast} isMobile={isMobile} designations={designations}/>}
-      {tab==="overview"&&<ManagementDashboard users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} setTab={setTab} lateCutoff={COMPANY.late_cutoff_time||"10:15"} setModal={setModal}/>}
-      {tab==="calendar"&&<TeamCalendar users={users} leaves={leaves} attendance={attendance} isMobile={isMobile}/>}
-      {tab==="assistant"&&<AIAssistant users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} lateCutoff={COMPANY.late_cutoff_time||"10:15"}/>}
+      {tab==="overview"&&<Suspense fallback={<Skeleton h={200}/>}><ManagementDashboard users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} setTab={setTab} lateCutoff={COMPANY.late_cutoff_time||"10:15"} setModal={setModal}/></Suspense>}
+      {tab==="calendar"&&<Suspense fallback={<Skeleton h={200}/>}><TeamCalendar users={users} leaves={leaves} attendance={attendance} isMobile={isMobile}/></Suspense>}
+      {tab==="assistant"&&<Suspense fallback={<Skeleton h={200}/>}><AIAssistant users={users} attendance={attendance} leaves={leaves} reimbursements={reimbursements} isMobile={isMobile} lateCutoff={COMPANY.late_cutoff_time||"10:15"}/></Suspense>}
     </div></div>
 
     {!isMobile&&<Footer COMPANY={COMPANY}/>}
@@ -410,9 +429,10 @@ function ApprovalsTab({ me, users, pendAtt, pendLeave, pendReimb, setModal }) {
 }
 
 // ── Reports Tab (with date range + export) ───────────────────────────────────
-function ReportsTab({ users, attendance, leaves, reimbursements, COMPANY, showToast }) {
+function ReportsTab({ users, attendance, leaves, reimbursements, COMPANY, showToast, lateCutoff="10:15" }) {
   const [dataset,setDataset]=useState("attendance");
   const [range,setRange]=useState("month");
+  const [view,setView]=useState("summary"); // summary | detailed
   const [customFrom,setCustomFrom]=useState(todayStr());
   const [customTo,setCustomTo]=useState(todayStr());
   const [summaryBusy,setSummaryBusy]=useState(false);
@@ -436,26 +456,69 @@ function ReportsTab({ users, attendance, leaves, reimbursements, COMPANY, showTo
 
   const inRange=(dateStr)=> dateStr>=from && dateStr<=to;
   const getU=id=>users.find(u=>u.id===id);
+  // working days (Mon-Sat) in range — Sundays excluded
+  const workingDaysInRange=()=>{ let c=0; const s=new Date(from),e=new Date(to); for(let d=new Date(s); d<=e; d.setDate(d.getDate()+1)){ if(d.getDay()!==0) c++; } return c; };
 
-  // Build rows per dataset
   let rows=[], columns=[], title="";
   if(dataset==="attendance"){
-    title="Attendance Report";
-    columns=["Date","Staff","Team","Login","Logout","Status","Remark"];
-    rows=attendance.filter(a=>inRange(a.date)).sort((a,b)=>b.date.localeCompare(a.date)).map(a=>{const u=getU(a.user_id);return [a.date,u?.name||"?",u?.team||"",a.login_time||"—",a.logout_time||"—",a.status,a.approver_remark||""];});
+    if(view==="summary"){
+      title="Attendance Summary";
+      columns=["Staff","Team","Working Days","Present","On Leave","Late","Absent"];
+      const totalWD=workingDaysInRange();
+      const staff=users.filter(u=>["member","lead"].includes(u.role)&&u.active!==false);
+      rows=staff.map(u=>{
+        const att=attendance.filter(a=>a.user_id===u.id&&inRange(a.date)&&a.status==="approved");
+        const present=new Set(att.map(a=>a.date)).size;
+        const late=att.filter(a=>a.login_time&&a.login_time>lateCutoff).length;
+        const onLeave=leaves.filter(l=>l.user_id===u.id&&l.status==="approved"&&!(l.to_date<from||l.from_date>to)).reduce((sum,l)=>sum+Number(l.days||0),0);
+        const absent=Math.max(0,totalWD-present-onLeave);
+        return [u.name,u.team||"",totalWD,present,onLeave,late,absent];
+      }).sort((a,b)=>b[3]-a[3]);
+    } else {
+      title="Attendance Report (Detailed)";
+      columns=["Date","Staff","Team","Login","Logout","Status","Remark"];
+      rows=attendance.filter(a=>inRange(a.date)).sort((a,b)=>b.date.localeCompare(a.date)).map(a=>{const u=getU(a.user_id);return [a.date,u?.name||"?",u?.team||"",a.login_time||"—",a.logout_time||"—",a.status,a.approver_remark||""];});
+    }
   } else if(dataset==="leaves"){
-    title="Leave Requests Report";
-    columns=["Submitted","Staff","Type","From","To","Days","Status","Mgmt Remark"];
-    rows=leaves.filter(l=>inRange((l.submitted_at||"").split("T")[0])).map(l=>{const u=getU(l.user_id);return [(l.submitted_at||"").split("T")[0],u?.name||"?",l.type,l.from_date,l.to_date,l.days,l.status,l.hr_comment||""];});
+    if(view==="summary"){
+      title="Leave Summary";
+      columns=["Staff","Team","Requests","Approved Days","Pending","Rejected"];
+      const staff=users.filter(u=>["member","lead"].includes(u.role)&&u.active!==false);
+      rows=staff.map(u=>{
+        const ls=leaves.filter(l=>l.user_id===u.id&&inRange((l.submitted_at||"").split("T")[0]));
+        const approvedDays=ls.filter(l=>l.status==="approved").reduce((s,l)=>s+Number(l.days||0),0);
+        const pending=ls.filter(l=>l.status&&l.status.startsWith("pending")).length;
+        const rejected=ls.filter(l=>l.status==="rejected").length;
+        return [u.name,u.team||"",ls.length,approvedDays,pending,rejected];
+      }).filter(r=>r[2]>0).sort((a,b)=>b[3]-a[3]);
+    } else {
+      title="Leave Requests Report (Detailed)";
+      columns=["Submitted","Staff","Type","From","To","Days","Status","Mgmt Remark"];
+      rows=leaves.filter(l=>inRange((l.submitted_at||"").split("T")[0])).map(l=>{const u=getU(l.user_id);return [(l.submitted_at||"").split("T")[0],u?.name||"?",l.type,l.from_date,l.to_date,l.days,l.status,l.hr_comment||""];});
+    }
   } else {
-    title="Reimbursement Report";
-    columns=["Submitted","Staff","Category","Amount","Description","Status","Approved On"];
-    rows=reimbursements.filter(r=>inRange((r.submitted_at||"").split("T")[0])).map(r=>{const u=getU(r.user_id);return [(r.submitted_at||"").split("T")[0],u?.name||"?",r.category,Number(r.amount),r.description,r.status,r.hr_at?fmt(r.hr_at):""];});
+    if(view==="summary"){
+      title="Reimbursement Summary";
+      columns=["Staff","Team","Claims","Approved (₹)","Pending (₹)","Rejected (₹)"];
+      const staff=users.filter(u=>["member","lead"].includes(u.role)&&u.active!==false);
+      rows=staff.map(u=>{
+        const rs=reimbursements.filter(r=>r.user_id===u.id&&inRange((r.submitted_at||"").split("T")[0]));
+        const appr=rs.filter(r=>r.status==="approved").reduce((s,r)=>s+Number(r.amount||0),0);
+        const pend=rs.filter(r=>r.status&&r.status.startsWith("pending")).reduce((s,r)=>s+Number(r.amount||0),0);
+        const rej=rs.filter(r=>r.status==="rejected").reduce((s,r)=>s+Number(r.amount||0),0);
+        return [u.name,u.team||"",rs.length,appr,pend,rej];
+      }).filter(r=>r[2]>0).sort((a,b)=>b[3]-a[3]);
+    } else {
+      title="Reimbursement Report (Detailed)";
+      columns=["Submitted","Staff","Category","Amount","Description","Status","Approved On"];
+      rows=reimbursements.filter(r=>inRange((r.submitted_at||"").split("T")[0])).map(r=>{const u=getU(r.user_id);return [(r.submitted_at||"").split("T")[0],u?.name||"?",r.category,Number(r.amount),r.description,r.status,r.hr_at?fmt(r.hr_at):""];});
+    }
   }
 
   const rangeLabel = range==="custom" ? `${from} to ${to}` : range==="day"?"Today":range==="week"?"Last 7 Days":"Last 30 Days";
+  const amountCols = ["Amount","Approved (₹)","Pending (₹)","Rejected (₹)"];
 
-  return <div>
+  return <div className="anm-fade">
     <h2 style={{margin:"0 0 20px",fontSize:20,fontWeight:800}}>Reports & Registers</h2>
 
     {/* Daily Summary card */}
@@ -464,7 +527,7 @@ function ReportsTab({ users, attendance, leaves, reimbursements, COMPANY, showTo
         <div style={{fontSize:28}}>📊</div>
         <div style={{flex:1,minWidth:200}}>
           <div style={{fontWeight:700,fontSize:15}}>Daily Summary to Management</div>
-          <div style={{fontSize:12,color:theme.muted}}>Sends the present/absent count plus leave &amp; expense activity for today as an in-app alert to all Management &amp; Admin. Runs automatically every evening, or generate now.</div>
+          <div style={{fontSize:12,color:theme.muted}}>Sends the present/absent count plus leave &amp; expense activity for today to Management &amp; Admin (in-app and Basecamp). Runs automatically every evening, or generate now.</div>
         </div>
         <Button onClick={runSummary} disabled={summaryBusy} style={{background:theme.purple}}>{summaryBusy?"Generating…":"📤 Generate & Send Now"}</Button>
       </div>
@@ -473,17 +536,19 @@ function ReportsTab({ users, attendance, leaves, reimbursements, COMPANY, showTo
 
     <Card style={{marginBottom:20}}>
       <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"flex-end"}}>
-        <Sel label="Report Type" value={dataset} onChange={setDataset} options={[{value:"attendance",label:"Attendance"},{value:"leaves",label:"Leave Requests"},{value:"reimbursements",label:"Reimbursements"}]} style={{minWidth:160}}/>
-        <Sel label="Period" value={range} onChange={setRange} options={[{value:"day",label:"Daily (Today)"},{value:"week",label:"Weekly (7 days)"},{value:"month",label:"Monthly (30 days)"},{value:"custom",label:"Custom Range"}]} style={{minWidth:160}}/>
+        <Sel label="Report Type" value={dataset} onChange={setDataset} options={[{value:"attendance",label:"Attendance"},{value:"leaves",label:"Leave Requests"},{value:"reimbursements",label:"Reimbursements"}]} style={{minWidth:150}}/>
+        <Sel label="View" value={view} onChange={setView} options={[{value:"summary",label:"Summary"},{value:"detailed",label:"Detailed"}]} style={{minWidth:130}}/>
+        <Sel label="Period" value={range} onChange={setRange} options={[{value:"day",label:"Daily (Today)"},{value:"week",label:"Weekly (7 days)"},{value:"month",label:"Monthly (30 days)"},{value:"custom",label:"Custom Range"}]} style={{minWidth:150}}/>
         {range==="custom"&&<><Input label="From" type="date" value={customFrom} onChange={setCustomFrom}/><Input label="To" type="date" value={customTo} onChange={setCustomTo}/></>}
         <div style={{flex:1}}/>
-        <Button variant="outline" onClick={()=>exportCSV(title,columns,rows,rangeLabel,COMPANY)}>⬇ Excel/CSV</Button>
-        <Button onClick={()=>exportPDF(title,columns,rows,rangeLabel,COMPANY)}>⬇ PDF</Button>
+        <Button variant="outline" onClick={async()=>{const {exportCSV}=await import("./export");exportCSV(title,columns,rows,rangeLabel,COMPANY);}}>⬇ Excel/CSV</Button>
+        <Button onClick={async()=>{const {exportPDF}=await import("./export");exportPDF(title,columns,rows,rangeLabel,COMPANY);}}>⬇ PDF</Button>
       </div>
+      {view==="summary"&&dataset==="attendance"&&<div style={{fontSize:11,color:theme.dim,marginTop:10}}>Working days = Mon–Sat in the selected period (Sundays excluded). Switch to "Detailed" for the full punch list.</div>}
     </Card>
     <Card style={{padding:0,overflow:"hidden"}}>
-      <div style={{padding:"14px 18px",background:theme.surface,borderBottom:`1px solid ${theme.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontWeight:700,fontSize:14}}>{title}</div><div style={{fontSize:12,color:theme.muted}}>{rangeLabel} · {rows.length} record(s)</div></div>
-      <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr style={{background:theme.navy}}>{columns.map(c=><th key={c} style={{padding:"10px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:"#9AA3BF",textTransform:"uppercase",whiteSpace:"nowrap"}}>{c}</th>)}</tr></thead><tbody>{rows.length===0&&<tr><td colSpan={columns.length} style={{padding:"20px",textAlign:"center",color:theme.muted}}>No records in this period.</td></tr>}{rows.map((r,i)=><tr key={i} style={{background:i%2===0?theme.card:theme.bg,borderBottom:`1px solid ${theme.border}`}}>{r.map((cell,j)=><td key={j} style={{padding:"10px 14px",fontSize:13,color:theme.text,whiteSpace:"nowrap"}}>{columns[j]==="Amount"?`₹${Number(cell).toLocaleString("en-IN")}`:columns[j]==="Status"?<Badge status={cell}/>:String(cell)}</td>)}</tr>)}</tbody></table></div>
+      <div style={{padding:"14px 18px",background:theme.surface,borderBottom:`1px solid ${theme.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontWeight:700,fontSize:14}}>{title}</div><div style={{fontSize:12,color:theme.muted}}>{rangeLabel} · {rows.length} {view==="summary"?"employee(s)":"record(s)"}</div></div>
+      <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}><thead><tr style={{background:theme.navy}}>{columns.map(c=><th key={c} style={{padding:"10px 14px",textAlign:"left",fontSize:11,fontWeight:700,color:"#9AA3BF",textTransform:"uppercase",whiteSpace:"nowrap"}}>{c}</th>)}</tr></thead><tbody>{rows.length===0&&<tr><td colSpan={columns.length} style={{padding:"20px",textAlign:"center",color:theme.muted}}>No records in this period.</td></tr>}{rows.map((r,i)=><tr key={i} style={{background:i%2===0?theme.card:theme.bg,borderBottom:`1px solid ${theme.border}`}}>{r.map((cell,j)=><td key={j} style={{padding:"10px 14px",fontSize:13,color:theme.text,whiteSpace:"nowrap"}}>{amountCols.includes(columns[j])?`₹${Number(cell).toLocaleString("en-IN")}`:columns[j]==="Status"?<Badge status={cell}/>:String(cell)}</td>)}</tr>)}</tbody></table></div>
     </Card>
   </div>;
 }
@@ -491,7 +556,7 @@ function ReportsTab({ users, attendance, leaves, reimbursements, COMPANY, showTo
 // ── Admin Tab ────────────────────────────────────────────────────────────────
 function AdminTab({ me, users, activeUsers, COMPANY, updateRole, updateProfile, setActive, setLead, leaveTypes, allLeaveTypes, addType, updateType, removeType, quotas, setQuota, updateSettings, designations, allDesignations, addDesignation, updateDesignation, removeDesignation, setModal, showToast }) {
   const [sub,setSub]=useState("employees");
-  const subtabs=[{id:"employees",label:"👥 Employees"},{id:"designations",label:"🏷️ Designations"},{id:"leavetypes",label:"📅 Leave Types"},{id:"company",label:"🏢 Company Details"},{id:"basecamp",label:"🏕️ Basecamp"}];
+  const subtabs=[{id:"employees",label:"👥 Employees"},{id:"designations",label:"🏷️ Designations"},{id:"leavetypes",label:"📅 Leave Types"},{id:"company",label:"🏢 Company Details"},{id:"announce",label:"📢 Announcements"},{id:"basecamp",label:"🏕️ Basecamp"}];
   const leads=users.filter(u=>u.role==="lead");
   return <div className="anm-fade">
     <h2 style={{margin:"0 0 6px",fontSize:20,fontWeight:800}}>Admin Panel</h2>
@@ -502,6 +567,7 @@ function AdminTab({ me, users, activeUsers, COMPANY, updateRole, updateProfile, 
     {sub==="designations"&&<DesignationsAdmin allDesignations={allDesignations} addDesignation={addDesignation} updateDesignation={updateDesignation} removeDesignation={removeDesignation} showToast={showToast}/>}
     {sub==="leavetypes"&&<LeaveTypesAdmin allLeaveTypes={allLeaveTypes} addType={addType} updateType={updateType} removeType={removeType} showToast={showToast}/>}
     {sub==="company"&&<CompanyAdmin COMPANY={COMPANY} updateSettings={updateSettings} showToast={showToast}/>}
+    {sub==="announce"&&<AnnounceAdmin COMPANY={COMPANY} updateSettings={updateSettings} showToast={showToast}/>}
     {sub==="basecamp"&&<BasecampAdmin users={users} showToast={showToast}/>}
   </div>;
 }
@@ -539,7 +605,11 @@ function EmployeesAdmin({ users, leads, updateRole, setActive, setLead, leaveTyp
           <div><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Designation</label><select value={u.designation||""} onChange={e=>updateProfile(u.id,{designation:e.target.value})} style={{width:"100%",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",cursor:"pointer"}}><option value="">— None —</option>{designations.map(d=><option key={d.id} value={d.name}>{d.name}</option>)}</select></div>
           <div><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Team</label><input defaultValue={u.team||""} onBlur={e=>e.target.value!==u.team&&updateProfile(u.id,{team:e.target.value})} style={{width:"100%",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
         </div>
-        <div style={{marginBottom:16}}><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Basecamp Person ID <span style={{color:theme.dim,fontWeight:400,textTransform:"none"}}>(for Basecamp notifications)</span></label><input defaultValue={u.basecamp_person_id||""} onBlur={e=>e.target.value!==(u.basecamp_person_id||"")&&updateProfile(u.id,{basecamp_person_id:e.target.value.trim()})} placeholder="e.g. 49887210" style={{width:"100%",maxWidth:240,background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+          <div><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Mobile Number <span style={{color:theme.dim,fontWeight:400,textTransform:"none"}}>(for WhatsApp)</span></label><input defaultValue={u.phone||""} onBlur={e=>{const v=e.target.value.replace(/[^0-9]/g,"");if(v!==(u.phone||""))updateProfile(u.id,{phone:v});}} placeholder="919845012345" style={{width:"100%",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+          <div><label style={{fontSize:11,fontWeight:700,color:theme.muted,textTransform:"uppercase",display:"block",marginBottom:6}}>Basecamp Person ID <span style={{color:theme.dim,fontWeight:400,textTransform:"none"}}>(for Basecamp)</span></label><input defaultValue={u.basecamp_person_id||""} onBlur={e=>e.target.value!==(u.basecamp_person_id||"")&&updateProfile(u.id,{basecamp_person_id:e.target.value.trim()})} placeholder="e.g. 49887210" style={{width:"100%",background:"#fff",border:`1px solid ${theme.border}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"}}/></div>
+        </div>
+        <div style={{fontSize:11,color:theme.dim,marginBottom:14,marginTop:-6}}>Mobile: include country code, digits only (no + or spaces), e.g. 919845012345.</div>
         <div style={{fontSize:12,fontWeight:700,color:theme.muted,marginBottom:10,textTransform:"uppercase"}}>Leave Quota Overrides</div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:10}}>{leaveTypes.map(lt=>{const override=quotas.find(q=>q.user_id===u.id&&q.leave_type_id===lt.id);return <div key={lt.id} style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:12,color:theme.text,flex:1}}>{lt.name}</span><input type="number" defaultValue={override?override.qty:lt.default_qty} onBlur={e=>setQuota(u.id,lt.id,parseInt(e.target.value)||0)} style={{width:56,padding:"4px 6px",border:`1px solid ${theme.border}`,borderRadius:6,fontSize:12,fontFamily:"inherit"}}/></div>;})}</div>
         <div style={{fontSize:11,color:theme.dim,marginTop:8}}>Quota: default shown; change to set a per-employee override (saved on blur).</div>
@@ -558,6 +628,84 @@ function LeaveTypesAdmin({ allLeaveTypes, addType, updateType, removeType, showT
     <Card>
       <div style={{fontWeight:700,marginBottom:14}}>Leave Types & Default Quotas</div>
       <div style={{display:"flex",flexDirection:"column",gap:8}}>{allLeaveTypes.map(lt=><div key={lt.id} style={{display:"flex",alignItems:"center",gap:12,padding:"8px 0",borderBottom:`1px solid ${theme.border}`,opacity:lt.active?1:0.5}}><span style={{flex:1,fontWeight:600,fontSize:14}}>{lt.name}{!lt.active&&<span style={{fontSize:11,color:theme.red,marginLeft:8}}>(removed)</span>}</span><span style={{fontSize:12,color:theme.muted}}>Default:</span><input type="number" defaultValue={lt.default_qty} onBlur={e=>updateType(lt.id,{default_qty:parseInt(e.target.value)||0})} style={{width:60,padding:"4px 8px",border:`1px solid ${theme.border}`,borderRadius:6,fontSize:13,fontFamily:"inherit"}}/><span style={{fontSize:12,color:theme.muted}}>days/yr</span>{lt.active&&<Button size="sm" variant="ghost" onClick={()=>removeType(lt.id)}>Remove</Button>}</div>)}</div>
+    </Card>
+  </div>;
+}
+
+function AnnounceAdmin({ COMPANY, updateSettings, showToast }) {
+  const [title,setTitle]=useState("");
+  const [msg,setMsg]=useState("");
+  const [toBasecamp,setToBasecamp]=useState(true);
+  const [sending,setSending]=useState(false);
+  const [intro,setIntro]=useState(COMPANY.daily_summary_intro||"");
+  const [savingIntro,setSavingIntro]=useState(false);
+  // WhatsApp toggles
+  const [waOn,setWaOn]=useState(!!COMPANY.whatsapp_enabled);
+  const [waTypes,setWaTypes]=useState(COMPANY.whatsapp_types||{applied:true,recommended:true,approved_rejected:true,daily_summary:true});
+  const [savingWa,setSavingWa]=useState(false);
+
+  const send=async()=>{
+    if(!msg.trim()){ showToast("Please write a message","error"); return; }
+    setSending(true);
+    const res=await sendAnnouncement(title.trim(), msg.trim(), toBasecamp);
+    setSending(false);
+    if(res.error||!res.success){ showToast(res.error||"Failed to send","error"); }
+    else { showToast(`Announcement sent to ${res.notified} staff${res.basecamp?.posted?" + Basecamp":""}!`,"success"); setTitle(""); setMsg(""); }
+  };
+  const saveIntro=async()=>{
+    setSavingIntro(true);
+    const { error }=await updateSettings({ daily_summary_intro: intro });
+    setSavingIntro(false);
+    showToast(error?error.message:"Daily summary note saved!", error?"error":"success");
+  };
+  const saveWa=async()=>{
+    setSavingWa(true);
+    const { error }=await updateSettings({ whatsapp_enabled: waOn, whatsapp_types: waTypes });
+    setSavingWa(false);
+    showToast(error?error.message:"WhatsApp settings saved!", error?"error":"success");
+  };
+  const waRow=(key,label,desc)=>(
+    <label style={{display:"flex",alignItems:"flex-start",gap:10,padding:"10px 0",borderBottom:`1px solid ${theme.border}`,cursor:waOn?"pointer":"not-allowed",opacity:waOn?1:0.5}}>
+      <input type="checkbox" disabled={!waOn} checked={waTypes[key]!==false} onChange={e=>setWaTypes(p=>({...p,[key]:e.target.checked}))} style={{marginTop:3}}/>
+      <div><div style={{fontSize:13,fontWeight:600}}>{label}</div><div style={{fontSize:11,color:theme.muted}}>{desc}</div></div>
+    </label>
+  );
+
+  return <div>
+    <Card style={{marginBottom:16}}>
+      <div style={{fontWeight:700,marginBottom:6}}>📢 Send Announcement</div>
+      <div style={{fontSize:13,color:theme.muted,marginBottom:14}}>Send a notice to all active staff (holidays, events, reminders). Appears as an in-app notification for everyone, and optionally posts to Basecamp.</div>
+      <div style={{display:"flex",flexDirection:"column",gap:14,maxWidth:560}}>
+        <Input label="Title (optional)" value={title} onChange={setTitle} placeholder="e.g. Office Holiday — Diwali"/>
+        <div style={{display:"flex",flexDirection:"column",gap:6}}><label style={{fontSize:12,fontWeight:600,color:theme.muted,textTransform:"uppercase"}}>Message <span style={{color:theme.red}}>*</span></label><Textarea value={msg} onChange={setMsg} placeholder="Type your announcement…"/></div>
+        <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,cursor:"pointer"}}><input type="checkbox" checked={toBasecamp} onChange={e=>setToBasecamp(e.target.checked)}/> Also post to Basecamp (notifies everyone there)</label>
+        <Button onClick={send} disabled={sending||!msg.trim()} style={{alignSelf:"flex-start"}}>{sending?"Sending…":"📢 Send to All Staff"}</Button>
+      </div>
+    </Card>
+
+    <Card style={{marginBottom:16}}>
+      <div style={{fontWeight:700,marginBottom:6}}>💬 WhatsApp Notifications</div>
+      <div style={{fontSize:13,color:theme.muted,marginBottom:14}}>WhatsApp messages are paid per message. Turn the whole channel on/off, and pick exactly which notifications go out — to control cost. (Requires WhatsApp set up in Vercel + approved templates.)</div>
+      <label style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:waOn?theme.greenBg:theme.surface,border:`1px solid ${waOn?theme.green:theme.border}33`,borderRadius:10,cursor:"pointer",marginBottom:12,maxWidth:560}}>
+        <input type="checkbox" checked={waOn} onChange={e=>setWaOn(e.target.checked)}/>
+        <div style={{fontSize:14,fontWeight:700,color:waOn?theme.green:theme.text}}>WhatsApp notifications {waOn?"ON":"OFF"}</div>
+      </label>
+      <div style={{maxWidth:560}}>
+        {waRow("applied","New applications → approver","When staff apply for leave/expense, message the approver.")}
+        {waRow("recommended","Recommended → management","When a lead recommends, message Management.")}
+        {waRow("approved_rejected","Approved / Rejected → staff","Message the staff member with the final decision.")}
+        {waRow("daily_summary","Daily summary → management","The evening summary to Management/HR/Admin.")}
+      </div>
+      <Button onClick={saveWa} disabled={savingWa} style={{marginTop:14}}>{savingWa?"Saving…":"Save WhatsApp Settings"}</Button>
+    </Card>
+
+    <Card>
+      <div style={{fontWeight:700,marginBottom:6}}>📝 Daily Summary Note</div>
+      <div style={{fontSize:13,color:theme.muted,marginBottom:14}}>Add a custom line shown at the top of the daily summary sent to Management each evening (e.g. a reminder or focus for the day). Leave blank for none.</div>
+      <div style={{display:"flex",flexDirection:"column",gap:12,maxWidth:560}}>
+        <Textarea value={intro} onChange={setIntro} placeholder="e.g. Reminder: month-end filings due this week."/>
+        <Button onClick={saveIntro} disabled={savingIntro} style={{alignSelf:"flex-start"}}>{savingIntro?"Saving…":"Save Note"}</Button>
+      </div>
     </Card>
   </div>;
 }
